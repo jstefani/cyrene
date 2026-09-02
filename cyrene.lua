@@ -48,6 +48,11 @@
 --    for probability editing
 --    then click next to alt
 --    to go back
+--  hold & click next to alt
+--    for the pattern picker
+--    (keys select the current
+--     pattern, in rows across;
+--     same key exits)
 --
 -- Crow (optional):
 -- Configurable
