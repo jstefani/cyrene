@@ -59,6 +59,10 @@ Tuplet-based swing in Cyrene is different. Rather than making two-note pairs at 
 * Bottom right key is an alt key, hold to enter alt mode
   * Bottom left now shows page indicators: bright for current page, faded for inactive pages. Click an inactive page to switch to that page of the grid. Only relevant if you have a sequence length longer than your grid is wide
   * Click any track (rows 1-7) to enter probability editing mode for that track. Y axis now shows probability of a trigger firing on that step. Pagination works as usual, and you can click the key to the left of the alt key to go back to the default multi-track view
+* Monobright grids: PARAMS > Grid > Monobright Grid (Auto / No / Yes)
+  * Auto detects 40h and pre-2011 walnut/greyscale models from serial; unmatched grids stay varibright. Set Yes if the playhead is invisible, No if a varibright grid is being flattened
+  * Playhead and dim alt/page keys light at full brightness
+  * Trigger probability still maps to LED level. Monobright hardware only lights levels 8 and up, so dim probability shades stay off — the same steps that read as clearly lit on varibright
 
 ### Arc (optional)
 * Use the params page under "Arc" to control which encoder controls which parameter
