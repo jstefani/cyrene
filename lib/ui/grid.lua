@@ -32,12 +32,14 @@ local MONO_INACTIVE_PAGE_LEVEL = 15
 -- greyscale editions are all monobright. Varibright grids (2011+) report
 -- m1000xxx / m360xxx style serials, so anything unmatched is assumed
 -- varibright and can be corrected with the Monobright Grid param.
+-- The hyphen is optional: serials appear both as "m128-0123" and "m1280123"
+-- depending on era and firmware.
 local MONOBRIGHT_SERIAL_PATTERNS = {
-  "^m40h",    -- 40h series
-  "^m64%-",   -- 64 (walnut / greyscale)
-  "^m128%-",  -- 128 (walnut / greyscale)
-  "^m256%-",  -- 256 (walnut / greyscale)
-  "^m0000",   -- early 40h-era serials
+  "^m40h",     -- 40h series
+  "^m64%-?%d", -- 64 (walnut / greyscale)
+  "^m128%-?%d",-- 128 (walnut / greyscale)
+  "^m256%-?%d",-- 256 (walnut / greyscale)
+  "^m0000",    -- early 40h-era serials
 }
 
 local Trigs = {}
@@ -57,13 +59,31 @@ local Grid = {
 -- Does this grid's serial/name match a known monobright model?
 -- Accepts either a vport or a raw grid device; serial lives on the
 -- underlying .device, while the vport only carries a name.
+-- The serial and name as the detector sees them, for troubleshooting.
+function Grid.identify()
+  local device = Grid.connected_grid
+  if not device then return "no grid connected" end
+  local dev = device.device or device
+  return string.format("serial=%q name=%q %dx%d -> %s",
+    tostring(dev.serial or device.serial or ""),
+    tostring(dev.name or device.name or ""),
+    tonumber(device.cols) or 0, tonumber(device.rows) or 0,
+    Grid.detect_monobright(device) and "monobright" or "varibright")
+end
+
 function Grid.detect_monobright(device)
   if not device then return false end
   local dev = device.device or device
-  local id = ((dev.serial or device.serial or "") .. " "
-    .. (dev.name or device.name or "")):lower()
+  -- Match serial and name separately: g.name is "<friendly name> <serial>",
+  -- so an anchored pattern tested against the two concatenated would only
+  -- ever match the serial, never a model that shows up in the name.
+  local serial = (dev.serial or device.serial or ""):lower()
+  local name = (dev.name or device.name or ""):lower()
   for _, pattern in ipairs(MONOBRIGHT_SERIAL_PATTERNS) do
-    if id:match(pattern) then return true end
+    if serial:match(pattern) or name:match(pattern) then return true end
+    -- The name carries the serial appended, so also look for the model
+    -- anywhere in it rather than only at the start.
+    if name:match("%f[%w]" .. pattern:gsub("^%^", "")) then return true end
   end
   return false
 end
