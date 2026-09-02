@@ -56,6 +56,47 @@ function Sequencer:new(action, num_tracks, is_mod)
   return i
 end
 
+-- Hard ceiling on fill. The stage defaults top out well under this, so it is
+-- a backstop rather than the thing shaping the top stage -- but a user who
+-- raises the stage percentages can still be capped by it.
+local RANDOMIZE_MAX_FILL_DEFAULT = 80
+
+-- Defaults for each stage. The fill percentages are exposed as params (see
+-- add_params) so they can be overridden; the trig levels stay fixed, since
+-- they are velocity/probability rather than density.
+local RANDOMIZE_STAGE_DEFAULTS = {
+  {fill_lo = 10, fill_hi = 25, level_lo = 140, level_hi = 200}, -- 1: sparse
+  {fill_lo = 16, fill_hi = 32, level_lo = 150, level_hi = 220}, -- 2: a little more
+  {fill_lo = 25, fill_hi = 45, level_lo = 160, level_hi = 240}, -- 3: moderate
+  {fill_lo = 33, fill_hi = 55, level_lo = 170, level_hi = 255}, -- 4: busiest, still sparse
+}
+
+local function _stage_fill_lo_id(stage) return "cy_randomize_" .. stage .. "_fill_lo" end
+local function _stage_fill_hi_id(stage) return "cy_randomize_" .. stage .. "_fill_hi" end
+
+-- Live stage settings: the params when they exist, the defaults otherwise.
+local function _randomize_stage(stage)
+  local defaults = RANDOMIZE_STAGE_DEFAULTS[stage]
+  local lo_id, hi_id = _stage_fill_lo_id(stage), _stage_fill_hi_id(stage)
+  local lo = params.lookup[lo_id] and params:get(lo_id) or defaults.fill_lo
+  local hi = params.lookup[hi_id] and params:get(hi_id) or defaults.fill_hi
+  -- Tolerate a user setting lo above hi rather than producing an empty range
+  if lo > hi then lo, hi = hi, lo end
+  return {
+    fill_lo = lo / 100,
+    fill_hi = hi / 100,
+    level_lo = defaults.level_lo,
+    level_hi = defaults.level_hi,
+  }
+end
+
+local function _randomize_max_fill()
+  if params.lookup["cy_randomize_max_fill"] then
+    return params:get("cy_randomize_max_fill") / 100
+  end
+  return RANDOMIZE_MAX_FILL_DEFAULT / 100
+end
+
 function Sequencer:add_params(arcify)
   params:add_separator("Cyrene")
   params:add {
@@ -573,46 +614,6 @@ end
 -- tracks do not all land on the same density. Trig values are probabilities
 -- (0-255) which the per-track density param then gates, so the stages vary
 -- both how many steps fire and how confidently they fire.
--- Hard ceiling on fill. The stage defaults top out well under this, so it is
--- a backstop rather than the thing shaping the top stage -- but a user who
--- raises the stage percentages can still be capped by it.
-local RANDOMIZE_MAX_FILL_DEFAULT = 80
-
--- Defaults for each stage. The fill percentages are exposed as params (see
--- add_params) so they can be overridden; the trig levels stay fixed, since
--- they are velocity/probability rather than density.
-local RANDOMIZE_STAGE_DEFAULTS = {
-  {fill_lo = 10, fill_hi = 25, level_lo = 140, level_hi = 200}, -- 1: sparse
-  {fill_lo = 16, fill_hi = 32, level_lo = 150, level_hi = 220}, -- 2: a little more
-  {fill_lo = 25, fill_hi = 45, level_lo = 160, level_hi = 240}, -- 3: moderate
-  {fill_lo = 33, fill_hi = 55, level_lo = 170, level_hi = 255}, -- 4: busiest, still sparse
-}
-
-local function _stage_fill_lo_id(stage) return "cy_randomize_" .. stage .. "_fill_lo" end
-local function _stage_fill_hi_id(stage) return "cy_randomize_" .. stage .. "_fill_hi" end
-
--- Live stage settings: the params when they exist, the defaults otherwise.
-local function _randomize_stage(stage)
-  local defaults = RANDOMIZE_STAGE_DEFAULTS[stage]
-  local lo_id, hi_id = _stage_fill_lo_id(stage), _stage_fill_hi_id(stage)
-  local lo = params.lookup[lo_id] and params:get(lo_id) or defaults.fill_lo
-  local hi = params.lookup[hi_id] and params:get(hi_id) or defaults.fill_hi
-  -- Tolerate a user setting lo above hi rather than producing an empty range
-  if lo > hi then lo, hi = hi, lo end
-  return {
-    fill_lo = lo / 100,
-    fill_hi = hi / 100,
-    level_lo = defaults.level_lo,
-    level_hi = defaults.level_hi,
-  }
-end
-
-local function _randomize_max_fill()
-  if params.lookup["cy_randomize_max_fill"] then
-    return params:get("cy_randomize_max_fill") / 100
-  end
-  return RANDOMIZE_MAX_FILL_DEFAULT / 100
-end
 
 -- Euclidean tracks regenerate from their own params, so randomizing them
 -- would be undone on the next euclidean recompute.
