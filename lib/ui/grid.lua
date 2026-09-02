@@ -37,13 +37,20 @@ local MONO_INACTIVE_PAGE_LEVEL = 15
 -- greyscale editions are all monobright. Varibright grids (2011+) report
 -- m1000xxx / m360xxx style serials, so anything unmatched is assumed
 -- varibright and can be corrected with the Monobright Grid param.
--- The hyphen is optional: serials appear both as "m128-0123" and "m1280123"
--- depending on era and firmware.
+-- Serial prefixes for the monobright models. These require the hyphen, which
+-- the pre-2011 walnut and greyscale editions use: matching the bare "m256"
+-- prefix would also catch any later varibright unit sharing it, and wrongly
+-- flattening a varibright grid is worse than failing to detect a monobright
+-- one -- the latter is one param away from being fixed, the former silently
+-- discards brightness the grid can actually show.
+--
+-- Detection cannot be exhaustive in any case, which is why the Monobright
+-- Grid param has explicit No/Yes settings that override this entirely.
 local MONOBRIGHT_SERIAL_PATTERNS = {
   "^m40h",     -- 40h series
-  "^m64%-?%d", -- 64 (walnut / greyscale)
-  "^m128%-?%d",-- 128 (walnut / greyscale)
-  "^m256%-?%d",-- 256 (walnut / greyscale)
+  "^m64%-%d",  -- 64 (walnut / greyscale)
+  "^m128%-%d", -- 128 (walnut / greyscale)
+  "^m256%-%d", -- 256 (walnut / greyscale)
   "^m0000",    -- early 40h-era serials
 }
 
