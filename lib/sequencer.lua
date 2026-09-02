@@ -533,14 +533,15 @@ end
 -- tracks do not all land on the same density. Trig values are probabilities
 -- (0-255) which the per-track density param then gates, so the stages vary
 -- both how many steps fire and how confidently they fire.
--- Hard ceiling on fill, so even the densest stage leaves gaps for the groove
+-- Hard ceiling on fill. The stages below now top out well under this, so it
+-- is a backstop rather than the thing shaping the top stage.
 local RANDOMIZE_MAX_FILL = 0.80
 
 local RANDOMIZE_STAGES = {
   {fill_lo = 0.10, fill_hi = 0.25, level_lo = 140, level_hi = 200}, -- 1: sparse
-  {fill_lo = 0.25, fill_hi = 0.45, level_lo = 150, level_hi = 220}, -- 2: filling in
-  {fill_lo = 0.40, fill_hi = 0.62, level_lo = 160, level_hi = 240}, -- 3: busy
-  {fill_lo = 0.55, fill_hi = 0.80, level_lo = 170, level_hi = 255}, -- 4: dense, still breathing
+  {fill_lo = 0.16, fill_hi = 0.32, level_lo = 150, level_hi = 220}, -- 2: a little more
+  {fill_lo = 0.25, fill_hi = 0.45, level_lo = 160, level_hi = 240}, -- 3: moderate
+  {fill_lo = 0.33, fill_hi = 0.55, level_lo = 170, level_hi = 255}, -- 4: busiest, still sparse
 }
 
 -- Euclidean tracks regenerate from their own params, so randomizing them
