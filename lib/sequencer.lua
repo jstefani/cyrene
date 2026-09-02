@@ -500,6 +500,79 @@ function Sequencer:set_grids_xy(patternno, x, y, force)
   self._euclidean_hat = euclidean_hat
 end
 
+-- Randomize the programmed steps of every track this script actually owns.
+--
+-- Tracks 1-3 are written by the Grids drum map (set_grids_xy) and any track
+-- with euclidean mode on is written by recompute_euclidean_for_track, so
+-- randomizing either would be pointless -- the next Pattern X/Y nudge or
+-- euclidean recompute would overwrite it. Only the remaining tracks are
+-- touched.
+--
+-- Presses cycle through four stages of increasing density, then loop back.
+--
+-- Each stage picks an exact number of steps to fill rather than flipping a
+-- coin per step. Independent per-step rolls would occasionally produce a
+-- completely full bar even at a modest average, and a wall of hits with no
+-- gaps is exactly what this should not generate. Choosing the count keeps
+-- the top stage at a hard 80% ceiling, so there is always breathing space.
+--
+-- fill_lo/fill_hi are the fraction of steps filled, picked per track so the
+-- tracks do not all land on the same density. Trig values are probabilities
+-- (0-255) which the per-track density param then gates, so the stages vary
+-- both how many steps fire and how confidently they fire.
+-- Hard ceiling on fill, so even the densest stage leaves gaps for the groove
+local RANDOMIZE_MAX_FILL = 0.80
+
+local RANDOMIZE_STAGES = {
+  {fill_lo = 0.10, fill_hi = 0.25, level_lo = 140, level_hi = 200}, -- 1: sparse
+  {fill_lo = 0.25, fill_hi = 0.45, level_lo = 150, level_hi = 220}, -- 2: filling in
+  {fill_lo = 0.40, fill_hi = 0.62, level_lo = 160, level_hi = 240}, -- 3: busy
+  {fill_lo = 0.55, fill_hi = 0.80, level_lo = 170, level_hi = 255}, -- 4: dense, still breathing
+}
+
+function Sequencer:randomize_stage_count()
+  return #RANDOMIZE_STAGES
+end
+
+-- Is this track's step data owned by Grids or euclidean rather than the user?
+function Sequencer:_is_track_generated(track)
+  if params:get("cy_"..track.."_euclidean_enabled") == 2 then return true end
+  return track <= 3
+end
+
+function Sequencer:randomize_tracks()
+  self._randomize_stage = ((self._randomize_stage or 0) % #RANDOMIZE_STAGES) + 1
+  local stage = RANDOMIZE_STAGES[self._randomize_stage]
+  local patternno = self:_get_pattern_number()
+  local pattern_length = self:get_pattern_length()
+  local randomized = 0
+  for track = 1, self.num_tracks do
+    if not self:_is_track_generated(track) then
+      randomized = randomized + 1
+      -- Clear, then fill an exact number of randomly chosen steps
+      for step = 1, pattern_length do
+        self:set_trig(patternno, step, track, 0)
+      end
+      local fill = stage.fill_lo + (math.random() * (stage.fill_hi - stage.fill_lo))
+      local num_steps = util.round(pattern_length * fill)
+      num_steps = util.clamp(num_steps, 1, math.floor(pattern_length * RANDOMIZE_MAX_FILL))
+      local remaining = num_steps
+      -- Walk the steps once, filling with the probability needed to land on
+      -- exactly num_steps (reservoir-style, so the hits are evenly scattered)
+      for step = 1, pattern_length do
+        local steps_left = pattern_length - step + 1
+        if remaining > 0 and math.random() < (remaining / steps_left) then
+          self:set_trig(patternno, step, track, math.random(stage.level_lo, stage.level_hi))
+          remaining = remaining - 1
+        end
+      end
+    end
+  end
+  UI.grid_dirty = true
+  UI.screen_dirty = true
+  return self._randomize_stage, randomized
+end
+
 function Sequencer:recompute_euclidean_for_track(track)
   local eucl_mode_param_id = "cy_"..track.."_euclidean_enabled"
   local enabled = params:get(eucl_mode_param_id) == 2

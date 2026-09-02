@@ -22,7 +22,10 @@
 -- Global pitch, filter,
 --  and main output level
 -- Hold K3 on section 2
---  to reset all to neutral
+--  to randomize the steps
+--  of the programmed tracks
+--  (4 density stages, then
+--   loops back to sparse)
 --
 -- Pattern & Density page:
 -- K2 & K3 switch sections
