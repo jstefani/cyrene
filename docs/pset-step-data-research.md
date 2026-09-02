@@ -58,9 +58,26 @@ Measured directly from `grids_patterns.lua` at pattern length 16:
 | 255,255 | 41 | 85% |
 | 200,100 | 48 | **100%** |
 
-Average **89%**. So "all steps become filled" is the drum map behaving
-normally; the grid is showing probability, not audible hits. Density then
-gates which of those actually fire, so it sounds far sparser than it looks.
+Average **89%**. So the underlying data really is nonzero nearly
+everywhere; the grid is showing probability, not audible hits.
+
+**But the severity of how this looks is display-dependent.** On a varibright
+grid those steps render across levels 3-15, and most land at 3-7 -- dim
+enough to read as background. Only about 27% look clearly lit. The
+monobright support added in `feature/monobright-playhead` originally
+collapsed every nonzero trig to level 15, which made the same data read as
+73-100% full.
+
+| Pattern X,Y | nonzero | monobright (before fix) | varibright (>= level 8) |
+|---|---|---|---|
+| 128,128 | 44/48 | 44 (92%) | 13 (27%) |
+| 192,192 | 48/48 | 48 (100%) | 18 (38%) |
+| 200,100 | 48/48 | 48 (100%) | 12 (25%) |
+
+That flattening was a real bug in the monobright work, fixed by thresholding
+at trig value 159 (where the varibright curve first reaches level 8). The
+underlying "the drum map fills tracks 1-3" behaviour is upstream and
+unchanged.
 
 ## Summary
 
