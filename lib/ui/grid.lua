@@ -18,6 +18,8 @@ local INACTIVE_ALT_LEVEL = 4
 local ACTIVE_PAGE_LEVEL = 15
 local INACTIVE_PAGE_LEVEL = 4
 local CLEAR_LEVEL = 0
+local CURRENT_PATTERN_LEVEL = 15
+local AVAILABLE_PATTERN_LEVEL = 4
 
 -- On a monobright grid the hardware lights any level >= 8 at full brightness
 -- and treats anything below as off, so these UI elements -- all dimmer than
@@ -49,6 +51,7 @@ local MONOBRIGHT_SERIAL_PATTERNS = {
 
 local Trigs = {}
 local Probabilities = {track=1}
+local Patterns = {}
 
 local Grid = {
   connected_grid = nil,
@@ -159,8 +162,12 @@ function Grid.init(sequencer)
           -- Otherwise we only care about key downs
           -- Key downs in the last row while holding alt are attempts at pagination
           if Grid.grid_alt_key_down_time then
-            -- Only paginate if they clicked a valid page
-            if x <= Grid._last_page_number(sequencer) then
+            if x == Grid.grid_width - 1 then
+              -- Alt + the key next to alt toggles the pattern picker
+              Grid.mode = (Grid.mode == Patterns) and Trigs or Patterns
+              Grid.grid_alt_action_taken = true
+            elseif x <= Grid._last_page_number(sequencer) then
+              -- Only paginate if they clicked a valid page
               Grid.page_number = x
               Grid.grid_alt_action_taken = true
             end
@@ -194,7 +201,11 @@ function Grid.init(sequencer)
               end
             elseif Grid.grid_alt_key_down_time then
               -- If the alt key is being held, use the bottom left corner to show pagination options
-              if x == Grid.page_number then
+              if x == Grid.grid_width - 1 then
+                -- and the key next to alt to show the pattern picker toggle
+                Grid.connected_grid:led(x, y,
+                  Grid.mode == Patterns and ACTIVE_PAGE_LEVEL or INACTIVE_PAGE_LEVEL)
+              elseif x == Grid.page_number then
                 Grid.connected_grid:led(x, y, ACTIVE_PAGE_LEVEL)
               elseif x <= Grid._last_page_number(sequencer) then
                 Grid.connected_grid:led(x, y, Grid._inactive_page_level())
@@ -334,6 +345,68 @@ function Probabilities.refresh_grid_button(x, y, sequencer)
     local is_beyond_pattern_end = trig_x > sequencer:get_pattern_length()
     local grid_trig_level = is_beyond_pattern_end and math.ceil(TRIG_LEVEL * 0.33) or TRIG_LEVEL
     Grid.connected_grid:led(x, y, grid_trig_level)
+  end
+end
+
+--------------------
+-- Patterns mode --
+--------------------
+
+-- Patterns are laid out in reading order across rows 1-7: the first row is
+-- patterns 1..width, the second continues from there, and so on. The bottom
+-- row is left to the shared alt and pagination handling, as in the other
+-- modes.
+--
+-- Both an 8- and a 16-wide grid have room for all of them (7 x 8 = 56 and
+-- 7 x 16 = 112, against 50 patterns), so there is nothing to paginate; any
+-- key past the last pattern is simply inert.
+
+-- The pattern count comes from the param itself rather than a copy of the
+-- constant, so this stays right if the sequencer's pattern count changes.
+-- In the mod, cy_pattern does not exist and there is only ever pattern 1.
+function Patterns._num_patterns()
+  local param = params.lookup["cy_pattern"] and params:lookup_param("cy_pattern")
+  return param and param.max or 1
+end
+
+function Patterns._pattern_for(x, y)
+  if y >= HEIGHT then return nil end
+  local pattern = ((y - 1) * Grid.grid_width) + x
+  if pattern > Patterns._num_patterns() then return nil end
+  return pattern
+end
+
+function Patterns.key_callback(x, y, state, sequencer)
+  -- Only count key downs
+  if state ~= 1 then return end
+  if y == HEIGHT then
+    if x == Grid.grid_width - 1 and not Grid.grid_alt_key_down_time then
+      -- Key next to alt key takes back to Trigs mode, as in Probabilities
+      Grid.mode = Trigs
+    end
+    return
+  end
+  if Grid.grid_alt_key_down_time then return end
+  local pattern = Patterns._pattern_for(x, y)
+  if pattern and params.lookup["cy_pattern"] then
+    params:set("cy_pattern", pattern)
+    UIState.screen_dirty = true
+  end
+end
+
+function Patterns.refresh_grid_button(x, y, sequencer)
+  -- Show a page back button next to the alt button
+  if y == HEIGHT and x == Grid.grid_width - 1 then
+    Grid.connected_grid:led(x, y, INACTIVE_ALT_LEVEL)
+    return
+  end
+  local pattern = Patterns._pattern_for(x, y)
+  if pattern == nil then
+    Grid.connected_grid:led(x, y, CLEAR_LEVEL)
+  elseif params.lookup["cy_pattern"] and pattern == params:get("cy_pattern") then
+    Grid.connected_grid:led(x, y, CURRENT_PATTERN_LEVEL)
+  else
+    Grid.connected_grid:led(x, y, AVAILABLE_PATTERN_LEVEL)
   end
 end
 
