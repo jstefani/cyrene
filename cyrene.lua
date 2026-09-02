@@ -77,6 +77,15 @@
 -- E3: Pattern X
 -- E4: Pattern Y
 --
+-- Track lengths:
+-- Each track has its own
+--  length (params menu,
+--  "N: Length") and runs
+--  free of the others
+-- Stop resets them all
+-- Each pattern remembers
+--  its own track lengths
+--
 -- Change samples, fx, etc
 --  via the params menu
 --

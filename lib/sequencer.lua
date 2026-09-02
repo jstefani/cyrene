@@ -7,6 +7,7 @@ local EuclideanUI = require('cyrene/lib/ui/euclidean')
 local CrowIO = require('cyrene/lib/crow_io')
 
 local PATTERN_FILE = "step.data"
+local PATTERN_FILE_V2_MARKER = "CYRENE_V2"
 
 local NUM_PATTERNS = 50
 local ppqn = 24
@@ -33,6 +34,16 @@ function Sequencer:new(action, num_tracks, is_mod)
   i:_init_trigs()
   i.playing = false
   i.playpos = -1
+  -- Per-track playheads. self.playpos stays as the master position: it still
+  -- wraps at cy_pattern_length and remains the reference for all swing and
+  -- shuffle maths, which are properties of the bar rather than of any one
+  -- track. These are additional, and are what each track actually reads from.
+  i.playposes = {}
+  for track=1,NUM_TRACKS do
+    i.playposes[track] = -1
+  end
+  -- [patternno][track] -> length. Absent means "follow the master length".
+  i.track_lengths = {}
   i._action = action
   i.num_tracks = num_tracks or NUM_TRACKS
   i.ticks_to_next = nil
@@ -142,7 +153,8 @@ function Sequencer:add_params(arcify)
       min=1,
       max=NUM_PATTERNS,
       default=1,
-      action=function()
+      action=function(value)
+        self:load_track_lengths_for_pattern(value)
         UI.grid_dirty = true
       end
     }
@@ -325,6 +337,32 @@ function Sequencer:add_params(arcify)
 end
 
 function Sequencer:add_params_for_track(track, arcify, pages)
+  local track_length_param_id = "cy_"..track.."_track_length"
+  params:add {
+    type="number",
+    id=track_length_param_id,
+    name=track..": Length",
+    min=1,
+    max=MAX_PATTERN_LENGTH,
+    default=params:get("cy_pattern_length"),
+    action=function(value)
+      -- Lengths are per pattern, but params are global, so mirror the edit into
+      -- the current pattern's row. _syncing guards against the write-back that
+      -- would otherwise happen while a pattern switch is loading values in.
+      if not self._syncing_track_lengths then
+        self:_store_track_length(self:_get_pattern_number(), track, value)
+      end
+      -- Keep the playhead inside the new length rather than stranding it
+      if self.playposes[track] and self.playposes[track] >= value then
+        self.playposes[track] = self.playposes[track] % value
+      end
+      UI.grid_dirty = true
+      UI.params_dirty = true
+      UI.screen_dirty = true
+    end
+  }
+  if arcify then arcify:register(track_length_param_id) end
+
   local density_param_id = "cy_"..track.."_density"
   local density_param_name = track..": Density"
   params:add {
@@ -419,6 +457,10 @@ end
 function Sequencer:initialize()
   self:_update_clock_sync_resolution()
   self:load_patterns()
+  -- Push the loaded pattern's lengths into the params. Runs after
+  -- load_patterns, and after params:read/bang in cyrene.lua's init, so it wins
+  -- over whatever the PSET happened to leave in the length params.
+  self:load_track_lengths_for_pattern(self:_get_pattern_number())
   self._is_initialized = true
 end
 
@@ -438,6 +480,9 @@ end
 
 function Sequencer:_move_to_start()
   self.playpos = -1
+  for track=1,self.num_tracks do
+    self.playposes[track] = -1
+  end
   self.queued_playpos = 0
 end
 
@@ -482,12 +527,63 @@ function Sequencer:get_pattern_length()
   return params:get("cy_pattern_length")
 end
 
+-- A track's own length, falling back to the master length when the per-track
+-- param does not exist yet (early init) or in the mod, which never adds them.
+function Sequencer:get_track_length(track)
+  local id = "cy_"..track.."_track_length"
+  if params.lookup[id] then
+    return params:get(id)
+  end
+  return self:get_pattern_length()
+end
+
+function Sequencer:_store_track_length(patternno, track, length)
+  if self.track_lengths[patternno] == nil then
+    self.track_lengths[patternno] = {}
+  end
+  self.track_lengths[patternno][track] = length
+end
+
+-- Load a pattern's stored lengths into the params. Silent sets (the third
+-- argument) suppress the length action, which would otherwise write straight
+-- back into the pattern we are switching away from.
+function Sequencer:load_track_lengths_for_pattern(patternno)
+  self._syncing_track_lengths = true
+  local stored = self.track_lengths[patternno]
+  for track=1,self.num_tracks do
+    local id = "cy_"..track.."_track_length"
+    if params.lookup[id] then
+      local length = stored and stored[track] or self:get_pattern_length()
+      params:set(id, length, true)
+      if self.playposes[track] and self.playposes[track] >= length then
+        self.playposes[track] = self.playposes[track] % length
+      end
+    end
+  end
+  self._syncing_track_lengths = false
+  UI.grid_dirty = true
+  UI.params_dirty = true
+end
+
+-- The longest track, so the grid can page far enough to reach every step.
+function Sequencer:get_max_track_length()
+  local longest = self:get_pattern_length()
+  for track=1,self.num_tracks do
+    local length = self:get_track_length(track)
+    if length > longest then longest = length end
+  end
+  return longest
+end
+
 function Sequencer:set_pattern_length(pattern_length)
   params:set("cy_pattern_length", pattern_length)
 end
 
 function Sequencer:save_patterns()
   if self._is_mod then return end
+  -- Make sure the live params are captured against the current pattern before
+  -- writing, otherwise unsaved edits to the current pattern would be lost.
+  self:_capture_current_track_lengths()
   local fd=io.open(norns.state.data .. PATTERN_FILE,"w+")
   io.output(fd)
   for patternno=1,NUM_PATTERNS do
@@ -497,7 +593,28 @@ function Sequencer:save_patterns()
       end
     end
   end
+  -- Per-track lengths are appended after the trig block, behind a version
+  -- marker. Anything written before the trigs would shift every value in the
+  -- positional read and silently corrupt older files.
+  io.write(PATTERN_FILE_V2_MARKER .. "\n")
+  for patternno=1,NUM_PATTERNS do
+    for track=1,NUM_TRACKS do
+      local stored = self.track_lengths[patternno]
+      io.write((stored and stored[track] or 0) .. "\n")
+    end
+  end
   io.close(fd)
+end
+
+-- Mirror the live length params into the current pattern's row.
+function Sequencer:_capture_current_track_lengths()
+  local patternno = self:_get_pattern_number()
+  for track=1,self.num_tracks do
+    local id = "cy_"..track.."_track_length"
+    if params.lookup[id] then
+      self:_store_track_length(patternno, track, params:get(id))
+    end
+  end
 end
 
 function Sequencer:load_patterns()
@@ -509,6 +626,19 @@ function Sequencer:load_patterns()
       for track=1,NUM_TRACKS do
         for step=1,MAX_PATTERN_LENGTH do
           self:set_trig(patternno, step, track, tonumber(io.read()) or 0)
+        end
+      end
+    end
+    -- A file written before per-track lengths existed simply ends here, and
+    -- every track falls back to the master length.
+    if io.read() == PATTERN_FILE_V2_MARKER then
+      for patternno=1,NUM_PATTERNS do
+        for track=1,NUM_TRACKS do
+          local length = tonumber(io.read()) or 0
+          -- 0 means "was never given an explicit length"
+          if length > 0 then
+            self:_store_track_length(patternno, track, length)
+          end
         end
       end
     end
@@ -552,7 +682,6 @@ function Sequencer:set_grids_xy(patternno, x, y, force)
   -- so we'll want to set different triggers depending on our desired grid resolution
   local grid_resolution = self:_grid_resolution()
   local step_offset_multiplier = math.floor(32/grid_resolution)
-  local pattern_length = self:get_pattern_length()
   -- Chose four drum map nodes based on the first two bits of x and y
   local i = math.floor(x / 64) + 1 -- (x >> 6) + 1
   local j = math.floor(y / 64) + 1 -- (y >> 6) + 1
@@ -564,7 +693,10 @@ function Sequencer:set_grids_xy(patternno, x, y, force)
     local euclidean_mode = params:get(EuclideanUI.param_id_prefix_for_track(track).."_euclidean_enabled") == 2
     if not euclidean_mode and not self._grids_suppressed then
       local track_offset = ((track - 1) * DrumMap.PATTERN_LENGTH)
-      for step=1,pattern_length do
+      -- Fill this track's own length; the source map already wraps at
+      -- DrumMap.PATTERN_LENGTH via step_offset, so a longer track extends
+      -- naturally rather than leaving an empty tail.
+      for step=1,self:get_track_length(track) do
         local step_offset = (((step - 1) * step_offset_multiplier) % DrumMap.PATTERN_LENGTH) + 1
         local offset = track_offset + step_offset
         local a = a_map[offset]
@@ -633,12 +765,13 @@ function Sequencer:randomize_tracks(include_drum_tracks)
   local stage = _randomize_stage(self._randomize_stage)
   local max_fill = _randomize_max_fill()
   local patternno = self:_get_pattern_number()
-  local pattern_length = self:get_pattern_length()
   -- Taking over the drum tracks means holding the Grids drum map off them,
   -- otherwise the next Pattern X/Y change would overwrite the result.
   if include_drum_tracks then self._grids_suppressed = true end
   for track = 1, self.num_tracks do
     if not self:_is_track_generated(track, include_drum_tracks) then
+      -- Fill this track's own length, so a long track has no empty tail
+      local pattern_length = self:get_track_length(track)
       -- Clear, then fill an exact number of randomly chosen steps
       for step = 1, pattern_length do
         self:set_trig(patternno, step, track, 0)
@@ -673,8 +806,7 @@ function Sequencer:recompute_euclidean_for_track(track)
   local rotation = params:get(param_id_prefix.."_euclidean_rotation")
   local pattern = Euclidean.get_pattern(trigs, length, rotation)
   local patternno = self:_get_pattern_number()
-  local master_pattern_length = self:get_pattern_length()
-  for step=1,master_pattern_length do
+  for step=1,self:get_track_length(track) do
     -- Loop the euclidean pattern
     local pattern_index = (step - 1) % #pattern + 1
     self:set_trig(patternno, step, track, pattern[pattern_index] and 255 or 0)
@@ -718,18 +850,31 @@ function Sequencer:tick()
     if self.queued_playpos then
       self.playpos = self.queued_playpos
       self.queued_playpos = nil
+      -- A jumpcut moves every track. Each wraps the target into its own length,
+      -- so cutting to step 12 puts a length-8 track on step 4.
+      for track=1,self.num_tracks do
+        self.playposes[track] = self.playpos % self:get_track_length(track)
+      end
     else
       -- otherwise, advance by a beat
       self.playpos = (self.playpos + 1) % self:get_pattern_length()
-    end
-    if self.playpos == 0 then
-      -- At the start of the pattern, figure out how much to bump up our trigger level by based on the chaos parameter
       for track=1,self.num_tracks do
+        self.playposes[track] = (self.playposes[track] + 1) % self:get_track_length(track)
+      end
+    end
+    -- Chaos is re-rolled per track as that track loops, rather than on the
+    -- master wrap: with per-track lengths there is no single start of pattern.
+    -- (_part_perturbations was already a per-track array.)
+    for track=1,self.num_tracks do
+      if self.playposes[track] == 0 then
         local chaos = math.floor(params:get("cy_pattern_chaos") * 255 / 100 / 4)
         local random_byte = math.random(0, 255)
         self._part_perturbations[track] = math.floor(random_byte * chaos / 256)
       end
-      -- also, reset shuffle vars
+    end
+    if self.playpos == 0 then
+      -- Shuffle state stays on the master wrap: swing is a property of the bar,
+      -- not of an individual track.
       self._shuffle_basis_index = params:get("cy_shuffle_basis") - 1
       self._shuffle_feel_index = params:get("cy_shuffle_feel")
       self._ppqn_error = 0
@@ -739,7 +884,7 @@ function Sequencer:tick()
     local ts = {}
     local velocities = {}
     for y=1,self.num_tracks do
-      local trig_level = self:trig_level(patternno, self.playpos+1, y)
+      local trig_level = self:trig_level(patternno, self.playposes[y]+1, y)
       -- The original MI Grids algorithm makes it possible that a track would trigger on every beat
       -- If density > ~77%, chaos at 100%, and the random byte rolls full (or if density is higher, chaos can be lower, etc.)
       -- This seems... wrong to me, so I've made sure that if the trigger map says zero, that means no triggers happen.
