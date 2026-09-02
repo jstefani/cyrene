@@ -111,20 +111,35 @@ local pages_table
 local ui_refresh_metro
 local NUM_TRACKS = 7
 
--- Global filter: a per-octave offset applied on top of each track's own
--- filter cutoff. Cutoff is a frequency, so the offset is multiplicative
--- rather than a flat Hz shift, and each track keeps a "base" cutoff so
--- sweeping to the extremes and back is non-destructive (same approach as
--- the global pitch control).
-local global_filter_spec = ControlSpec.new(-36, 36, 'lin', 0, 0, 'st')
--- Each track's unshifted base cutoff lives in a hidden param so that the
--- base, not the derived value, is what gets written to the PSET.
--- params:read() is not silent -- it fires actions as it loads -- so saving
--- the shifted cutoff would apply the offset a second time on load and
--- compound across save/load cycles.
+-- Global filter: a DJ-style single-knob filter across all tracks.
+--
+--   < 0  every track switches to lowpass, sweeping down from 20kHz
+--   = 0  hands each track back its own filter mode and cutoff, untouched
+--   > 0  every track switches to highpass, sweeping up from 20Hz
+--
+-- At exactly zero the script writes nothing of its own: each track uses the
+-- filter type and cutoff the user set for it. Moving off zero takes over
+-- both, and returning to zero restores them, so the control is completely
+-- non-destructive.
+--
+-- The sweep is exponential in frequency (each unit is a constant ratio),
+-- because a linear Hz sweep spends nearly all its travel in a range the ear
+-- barely registers.
+local FILTER_MODE_LOWPASS = 1
+local FILTER_MODE_HIGHPASS = 3
+local FILTER_MIN_HZ = 20
+local FILTER_MAX_HZ = 20000
+-- How far the knob travels in each direction
+local global_filter_spec = ControlSpec.new(-100, 100, 'lin', 0, 0, '')
+
+-- Each track's own cutoff and mode live in hidden params so that they, not
+-- the swept values, are what get written to the PSET. params:read() is not
+-- silent -- it fires actions as it loads -- so saving the swept cutoff would
+-- lose the user's real setting the first time a PSET was saved mid-sweep.
 local is_applying_global_filter = false
 
 local function _base_cutoff_id(track) return "cy_" .. track .. "_base_cutoff" end
+local function _base_mode_id(track) return "cy_" .. track .. "_base_filter_mode" end
 
 local function _get_base_cutoff(track)
   local id = _base_cutoff_id(track)
@@ -132,14 +147,44 @@ local function _get_base_cutoff(track)
   return params:get(track .. "_filter_cutoff")
 end
 
+local function _get_base_mode(track)
+  local id = _base_mode_id(track)
+  if params.lookup[id] then return params:get(id) end
+  return params:get(track .. "_filter_mode")
+end
+
+-- Map knob travel (0..1 away from center) onto a frequency sweep.
+-- Lowpass closes 20kHz -> 20Hz; highpass opens 20Hz -> 20kHz.
+local function _sweep_hz(amount, is_highpass)
+  local ratio = FILTER_MAX_HZ / FILTER_MIN_HZ
+  if is_highpass then
+    return FILTER_MIN_HZ * (ratio ^ amount)
+  end
+  return FILTER_MAX_HZ * (ratio ^ -amount)
+end
+
 function _apply_global_filter(value)
-  local ratio = 2 ^ (value / 12)
   is_applying_global_filter = true
+  local spec_max = math.abs(global_filter_spec.maxval)
+  local amount = math.abs(value) / spec_max
   for track = 1, NUM_TRACKS do
     local cutoff_id = track .. "_filter_cutoff"
+    local mode_id = track .. "_filter_mode"
     if params.lookup[cutoff_id] then
-      local spec = params:lookup_param(cutoff_id).controlspec
-      params:set(cutoff_id, util.clamp(_get_base_cutoff(track) * ratio, spec.minval, spec.maxval))
+      if value == 0 then
+        -- Neutral: hand the track back its own filter, untouched
+        params:set(cutoff_id, _get_base_cutoff(track))
+        if params.lookup[mode_id] then
+          params:set(mode_id, _get_base_mode(track))
+        end
+      else
+        local is_highpass = value > 0
+        if params.lookup[mode_id] then
+          params:set(mode_id, is_highpass and FILTER_MODE_HIGHPASS or FILTER_MODE_LOWPASS)
+        end
+        local spec = params:lookup_param(cutoff_id).controlspec
+        params:set(cutoff_id, util.clamp(_sweep_hz(amount, is_highpass), spec.minval, spec.maxval))
+      end
     end
   end
   is_applying_global_filter = false
@@ -147,14 +192,24 @@ function _apply_global_filter(value)
   UIState.screen_dirty = true
 end
 
--- A direct edit to a track's cutoff rebases it at the current global offset.
+-- A direct edit to a track's cutoff or mode becomes its new base, but only
+-- while the global filter is neutral. Mid-sweep the script owns those
+-- params, so an edit then is the sweep writing, not the user.
 function _track_cutoff_changed(track, value)
   if is_applying_global_filter then return end
-  local offset = params.lookup["cy_global_filter"]
-    and params:get("cy_global_filter") or 0
+  if (params.lookup["cy_global_filter"] and params:get("cy_global_filter") or 0) ~= 0 then return end
   local id = _base_cutoff_id(track)
   if params.lookup[id] then
-    params:set(id, value / (2 ^ (offset / 12)), true) -- silent: no re-derive
+    params:set(id, value, true) -- silent: no re-derive
+  end
+end
+
+function _track_filter_mode_changed(track, value)
+  if is_applying_global_filter then return end
+  if (params.lookup["cy_global_filter"] and params:get("cy_global_filter") or 0) ~= 0 then return end
+  local id = _base_mode_id(track)
+  if params.lookup[id] then
+    params:set(id, value, true)
   end
 end
 
@@ -162,11 +217,17 @@ end
 -- cutoff; divide the saved offset back out once so it is not applied twice.
 function _migrate_base_cutoffs()
   if params:get("cy_base_cutoffs_saved") == 1 then return end
-  local ratio = 2 ^ (params:get("cy_global_filter") / 12)
+  -- Only trust the live values as the user's own when the filter is neutral;
+  -- mid-sweep they are the sweep's, and the real settings are unrecoverable,
+  -- so fall back to leaving whatever the track already has.
   for track = 1, NUM_TRACKS do
-    local id = _base_cutoff_id(track)
-    if params.lookup[id] then
-      params:set(id, params:get(track .. "_filter_cutoff") / ratio, true)
+    local cutoff_id = _base_cutoff_id(track)
+    if params.lookup[cutoff_id] then
+      params:set(cutoff_id, params:get(track .. "_filter_cutoff"), true)
+    end
+    local mode_id = _base_mode_id(track)
+    if params.lookup[mode_id] then
+      params:set(mode_id, params:get(track .. "_filter_mode"), true)
     end
   end
   params:set("cy_base_cutoffs_saved", 1, true)
@@ -183,11 +244,12 @@ local function init_params()
     elseif track == 2 then group_name = "Snare"
     elseif track == 3 then group_name = "Hi-Hat"
     end
-    params:add_group(group_name, 28)
+    params:add_group(group_name, 29)
     -- All the pages together add 5 params per track
     sequencer:add_params_for_track(track, arcify)
     Ack.add_channel_params(track) -- 22 params
-    -- Hidden param holding this track's unshifted base cutoff (see above)
+    -- Hidden params holding this track's own cutoff and filter mode, so the
+    -- DJ filter can hand them back when it returns to neutral (see above)
     params:add {
       type="control",
       id=_base_cutoff_id(track),
@@ -195,11 +257,25 @@ local function init_params()
       controlspec=params:lookup_param(track.."_filter_cutoff").controlspec,
     }
     params:hide(params.lookup[_base_cutoff_id(track)])
+    params:add {
+      type="number",
+      id=_base_mode_id(track),
+      name=track..": base filter mode",
+      min=1,
+      max=5,
+      default=params:get(track.."_filter_mode"),
+    }
+    params:hide(params.lookup[_base_mode_id(track)])
     -- Track direct cutoff edits so the global filter stays relative to them
     local ack_cutoff_action = params:lookup_param(track.."_filter_cutoff").action
     params:set_action(track.."_filter_cutoff", function(value)
       ack_cutoff_action(value)
       _track_cutoff_changed(track, value)
+    end)
+    local ack_mode_action = params:lookup_param(track.."_filter_mode").action
+    params:set_action(track.."_filter_mode", function(value)
+      ack_mode_action(value)
+      _track_filter_mode_changed(track, value)
     end)
     -- all params except the file are arcifyed
     arcify:register(track.."_start_pos")
@@ -242,7 +318,9 @@ local function init_params()
     name="Global Filter",
     controlspec=global_filter_spec,
     formatter=function(param)
-      return string.format("%+.1f st", param:get())
+      local v = param:get()
+      if math.abs(v) < 0.5 then return "off" end
+      return string.format("%s %d%%", v > 0 and "HP" or "LP", util.round(math.abs(v)))
     end,
     action=function(value) _apply_global_filter(value) end,
   }
