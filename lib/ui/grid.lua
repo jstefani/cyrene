@@ -7,6 +7,9 @@ local MAX_GRID_WIDTH = 16
 local HEIGHT = 8
 local CLICK_DURATION = 0.7
 
+-- Varibright levels. Monobright grids quantize these to on/off at a
+-- threshold of 8, so anything dimmer than that is invisible on such a
+-- grid -- notably the playhead at 7. See Grid.set_monobright.
 local TRIG_LEVEL = 15
 local MIN_TRIG_LEVEL = 2
 local PLAYPOS_LEVEL = 7
@@ -15,6 +18,27 @@ local INACTIVE_ALT_LEVEL = 4
 local ACTIVE_PAGE_LEVEL = 15
 local INACTIVE_PAGE_LEVEL = 4
 local CLEAR_LEVEL = 0
+
+-- On a monobright grid every lit LED is full brightness, so the dim levels
+-- above are pushed up to 15 and brightness can no longer encode anything.
+local MONO_TRIG_LEVEL = 15
+local MONO_MIN_TRIG_LEVEL = 15
+local MONO_PLAYPOS_LEVEL = 15
+local MONO_INACTIVE_ALT_LEVEL = 15
+local MONO_INACTIVE_PAGE_LEVEL = 15
+
+-- Serial prefixes of grids without variable brightness. Monome serials are
+-- model-prefixed: the 40h series and the pre-2011 m64/m128/m256 walnut and
+-- greyscale editions are all monobright. Varibright grids (2011+) report
+-- m1000xxx / m360xxx style serials, so anything unmatched is assumed
+-- varibright and can be corrected with the Monobright Grid param.
+local MONOBRIGHT_SERIAL_PATTERNS = {
+  "^m40h",    -- 40h series
+  "^m64%-",   -- 64 (walnut / greyscale)
+  "^m128%-",  -- 128 (walnut / greyscale)
+  "^m256%-",  -- 256 (walnut / greyscale)
+  "^m0000",   -- early 40h-era serials
+}
 
 local Trigs = {}
 local Probabilities = {track=1}
@@ -26,7 +50,50 @@ local Grid = {
   grid_alt_key_down_time = nil,
   grid_alt_action_taken = false,
   mode = Trigs,
+  -- Resolved brightness mode: true once we've decided the grid is monobright
+  is_monobright = false,
 }
+
+-- Does this grid's serial/name match a known monobright model?
+-- Accepts either a vport or a raw grid device; serial lives on the
+-- underlying .device, while the vport only carries a name.
+function Grid.detect_monobright(device)
+  if not device then return false end
+  local dev = device.device or device
+  local id = ((dev.serial or device.serial or "") .. " "
+    .. (dev.name or device.name or "")):lower()
+  for _, pattern in ipairs(MONOBRIGHT_SERIAL_PATTERNS) do
+    if id:match(pattern) then return true end
+  end
+  return false
+end
+
+-- Re-apply the current param setting (used when a grid is (re)connected).
+function Grid.refresh_monobright()
+  local setting = params.lookup["cy_monobright_grid"]
+    and params:get("cy_monobright_grid") or 1
+  Grid.set_monobright(setting)
+end
+
+-- Apply the Monobright Grid param: 1 = Auto (detect), 2 = No, 3 = Yes
+function Grid.set_monobright(setting)
+  if setting == 2 then
+    Grid.is_monobright = false
+  elseif setting == 3 then
+    Grid.is_monobright = true
+  else
+    Grid.is_monobright = Grid.detect_monobright(Grid.connected_grid)
+  end
+  UIState.grid_dirty = true
+end
+
+-- Brightness accessors: every LED level goes through these so a single
+-- switch flips the whole UI between varibright and monobright palettes.
+function Grid._trig_level() return Grid.is_monobright and MONO_TRIG_LEVEL or TRIG_LEVEL end
+function Grid._min_trig_level() return Grid.is_monobright and MONO_MIN_TRIG_LEVEL or MIN_TRIG_LEVEL end
+function Grid._playpos_level() return Grid.is_monobright and MONO_PLAYPOS_LEVEL or PLAYPOS_LEVEL end
+function Grid._inactive_alt_level() return Grid.is_monobright and MONO_INACTIVE_ALT_LEVEL or INACTIVE_ALT_LEVEL end
+function Grid._inactive_page_level() return Grid.is_monobright and MONO_INACTIVE_PAGE_LEVEL or INACTIVE_PAGE_LEVEL end
 
 function Grid.init(sequencer)
   UIState.init_grid {
@@ -83,14 +150,14 @@ function Grid.init(sequencer)
               if Grid.grid_alt_key_down_time then
                 Grid.connected_grid:led(x, y, ACTIVE_ALT_LEVEL)
               else
-                Grid.connected_grid:led(x, y, INACTIVE_ALT_LEVEL)
+                Grid.connected_grid:led(x, y, Grid._inactive_alt_level())
               end
             elseif Grid.grid_alt_key_down_time then
               -- If the alt key is being held, use the bottom left corner to show pagination options
               if x == Grid.page_number then
                 Grid.connected_grid:led(x, y, ACTIVE_PAGE_LEVEL)
               elseif x <= Grid._last_page_number(sequencer) then
-                Grid.connected_grid:led(x, y, INACTIVE_PAGE_LEVEL)
+                Grid.connected_grid:led(x, y, Grid._inactive_page_level())
               else
                 Grid.connected_grid:led(x, y, CLEAR_LEVEL)
               end
@@ -106,6 +173,9 @@ function Grid.init(sequencer)
     end,
     width_changed_callback = function(new_width)
       Grid.grid_width = new_width
+      -- A width change means a different grid was connected, so re-run
+      -- auto-detection against the new device.
+      Grid.refresh_monobright()
       UIState.grid_dirty = true
     end
   }
@@ -165,16 +235,24 @@ function Trigs.refresh_grid_button(x, y, sequencer)
   if trig_level == 0 then
     -- If there's no trigger in the slot, show the playhead if it's in our column, otherwise show empty
     if trig_x-1 == sequencer.playpos then
-      Grid.connected_grid:led(x, y, PLAYPOS_LEVEL)
+      Grid.connected_grid:led(x, y, Grid._playpos_level())
     else
       Grid.connected_grid:led(x, y, CLEAR_LEVEL)
     end
   else
-    -- Show the likelihood of a trigger firing via its brightness (down to some minimum brightness)
-    local grid_trig_level = math.ceil(util.linexp(0, 255, MIN_TRIG_LEVEL, TRIG_LEVEL, trig_level))
-    -- Fade out the columns beyond the end of the pattern
-    local is_beyond_pattern_end = trig_x > sequencer:get_pattern_length()
-    grid_trig_level = is_beyond_pattern_end and math.ceil(grid_trig_level * 0.33) or grid_trig_level
+    -- Show the likelihood of a trigger firing via its brightness (down to some minimum brightness).
+    -- On a monobright grid both ends of the range are 15, so skip the interpolation
+    -- (linexp with equal endpoints is degenerate) and just light the LED.
+    local grid_trig_level
+    if Grid.is_monobright then
+      grid_trig_level = Grid._trig_level()
+    else
+      grid_trig_level = math.ceil(util.linexp(0, 255, Grid._min_trig_level(), Grid._trig_level(), trig_level))
+      -- Fade out the columns beyond the end of the pattern. There is no dimmer
+      -- shade available on a monobright grid, so it stays lit there instead.
+      local is_beyond_pattern_end = trig_x > sequencer:get_pattern_length()
+      grid_trig_level = is_beyond_pattern_end and math.ceil(grid_trig_level * 0.33) or grid_trig_level
+    end
     Grid.connected_grid:led(x, y, grid_trig_level)
   end
 end
@@ -202,7 +280,7 @@ end
 function Probabilities.refresh_grid_button(x, y, sequencer)
   -- Show a page back button next to the alt button
   if y == 8 and x == Grid.grid_width - 1 then
-    Grid.connected_grid:led(x, y, INACTIVE_ALT_LEVEL)
+    Grid.connected_grid:led(x, y, Grid._inactive_alt_level())
     return
   end
   -- All rows that aren't the bottom row show the trig_level in the appropriate row, or the play position otherwise
@@ -216,13 +294,16 @@ function Probabilities.refresh_grid_button(x, y, sequencer)
   if show_playhead then
     -- If there's no trigger in the slot, show the playhead if it's in our column, otherwise show empty
     if trig_x-1 == sequencer.playpos then
-      Grid.connected_grid:led(x, y, PLAYPOS_LEVEL)
+      Grid.connected_grid:led(x, y, Grid._playpos_level())
     else
       Grid.connected_grid:led(x, y, CLEAR_LEVEL)
     end
   else
     local is_beyond_pattern_end = trig_x > sequencer:get_pattern_length()
-    grid_trig_level = is_beyond_pattern_end and math.ceil(TRIG_LEVEL * 0.33) or TRIG_LEVEL
+    local grid_trig_level = Grid._trig_level()
+    if is_beyond_pattern_end and not Grid.is_monobright then
+      grid_trig_level = math.ceil(grid_trig_level * 0.33)
+    end
     Grid.connected_grid:led(x, y, grid_trig_level)
   end
 end

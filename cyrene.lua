@@ -297,6 +297,20 @@ local function init_params()
     action=function() _randomize_pan() end,
   }
 
+  params:add_separator("Grid")
+  params:add {
+    type="option",
+    id="cy_monobright_grid",
+    name="Monobright Grid",
+    options={"Auto", "No", "Yes"},
+    default=1,
+    action=function(value)
+      -- On a monobright grid the dim playhead (level 7) is below the
+      -- on/off threshold and therefore invisible; this lights it fully.
+      GridUI.set_monobright(value)
+    end,
+  }
+
   params:add_group("Effects", 6)
   Ack.add_effects_params() -- 6 params
   arcify:register("delay_time")
