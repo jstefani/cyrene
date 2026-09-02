@@ -16,6 +16,14 @@
 -- (check README or wiki
 --  for more swing info)
 --
+-- Performance page:
+-- K2 & K3 switch sections
+-- E2 & E3 change values
+-- Global pitch, filter,
+--  and main output level
+-- Hold K3 on section 2
+--  to reset all to neutral
+--
 -- Pattern & Density page:
 -- K2 & K3 switch sections
 -- E2 & E3 change values
@@ -84,11 +92,13 @@ local current_version = "1.9.1"
 engine.name = 'Ack'
 
 local Ack = require 'ack/lib/ack'
+local ControlSpec = require 'controlspec'
 local UI = require 'ui'
 local Sequencer = require('cyrene/lib/sequencer')
 local MidiOut = require('cyrene/lib/midi_out')
 local PlaybackUI = require('cyrene/lib/ui/playback')
 local SwingUI = require('cyrene/lib/ui/swing')
+local PerformanceUI = require('cyrene/lib/ui/performance')
 local PatternAndDensityUI = require('cyrene/lib/ui/pattern_and_density')
 local MoreDensityUI = require('cyrene/lib/ui/more_density')
 local EuclideanUI = require('cyrene/lib/ui/euclidean')
@@ -105,6 +115,50 @@ local pages_table
 local ui_refresh_metro
 local NUM_TRACKS = 7
 
+-- Global filter: a per-octave offset applied on top of each track's own
+-- filter cutoff. Cutoff is a frequency, so the offset is multiplicative
+-- rather than a flat Hz shift, and each track keeps a "base" cutoff so
+-- sweeping to the extremes and back is non-destructive (same approach as
+-- the global pitch control).
+local global_filter_spec = ControlSpec.new(-36, 36, 'lin', 0, 0, 'st')
+local base_cutoffs = {}
+local is_applying_global_filter = false
+
+function _apply_global_filter(value)
+  local ratio = 2 ^ (value / 12)
+  is_applying_global_filter = true
+  for track = 1, NUM_TRACKS do
+    local cutoff_id = track .. "_filter_cutoff"
+    if params.lookup[cutoff_id] then
+      local base = base_cutoffs[track] or params:get(cutoff_id)
+      base_cutoffs[track] = base
+      local spec = params:lookup_param(cutoff_id).controlspec
+      params:set(cutoff_id, util.clamp(base * ratio, spec.minval, spec.maxval))
+    end
+  end
+  is_applying_global_filter = false
+  UIState.params_dirty = true
+  UIState.screen_dirty = true
+end
+
+function _recover_base_cutoffs()
+  local ratio = 2 ^ (params:get("cy_global_filter") / 12)
+  for track = 1, NUM_TRACKS do
+    local cutoff_id = track .. "_filter_cutoff"
+    if params.lookup[cutoff_id] then
+      base_cutoffs[track] = params:get(cutoff_id) / ratio
+    end
+  end
+end
+
+-- A direct edit to a track's cutoff rebases it at the current global offset.
+function _track_cutoff_changed(track, value)
+  if is_applying_global_filter then return end
+  local offset = params.lookup["cy_global_filter"]
+    and params:get("cy_global_filter") or 0
+  base_cutoffs[track] = value / (2 ^ (offset / 12))
+end
+
 local arc_device = arc.connect()
 local arcify = Arcify.new(arc_device, false)
 
@@ -120,6 +174,12 @@ local function init_params()
     -- All the pages together add 5 params per track
     sequencer:add_params_for_track(track, arcify)
     Ack.add_channel_params(track) -- 22 params
+    -- Track direct cutoff edits so the global filter stays relative to them
+    local ack_cutoff_action = params:lookup_param(track.."_filter_cutoff").action
+    params:set_action(track.."_filter_cutoff", function(value)
+      ack_cutoff_action(value)
+      _track_cutoff_changed(track, value)
+    end)
     -- all params except the file are arcifyed
     arcify:register(track.."_start_pos")
     arcify:register(track.."_end_pos")
@@ -143,6 +203,22 @@ local function init_params()
     arcify:register(track.."_delay_send")
     arcify:register(track.."_reverb_send")
   end
+  params:add_separator("Performance")
+  params:add {
+    type="control",
+    id="cy_global_filter",
+    name="Global Filter",
+    controlspec=global_filter_spec,
+    formatter=function(param)
+      return string.format("%+.1f st", param:get())
+    end,
+    action=function(value) _apply_global_filter(value) end,
+  }
+  arcify:register("cy_global_filter")
+  -- Ack provides a main output level that Cyrene never exposed
+  Ack.add_main_level_param() -- 1 param
+  arcify:register("main_level")
+
   params:add_group("Effects", 6)
   Ack.add_effects_params() -- 6 params
   arcify:register("delay_time")
@@ -220,6 +296,7 @@ function init()
   pages_table = {
     PlaybackUI:new(),
     SwingUI:new(),
+    PerformanceUI:new(),
     PatternAndDensityUI:new(),
     MoreDensityUI:new(),
     EuclideanUI:new(sequencer),
@@ -236,6 +313,9 @@ function init()
     _upgrade_to_1_6_0()
   end
   params:set("cyrene_version", current_version)
+  -- Saved cutoffs already include the saved global filter offset, so recover
+  -- each track's base before bang() re-applies it.
+  _recover_base_cutoffs()
   params:bang()
 
   _set_encoder_sensitivities()
