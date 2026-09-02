@@ -543,10 +543,6 @@ local RANDOMIZE_STAGES = {
   {fill_lo = 0.55, fill_hi = 0.80, level_lo = 170, level_hi = 255}, -- 4: dense, still breathing
 }
 
-function Sequencer:randomize_stage_count()
-  return #RANDOMIZE_STAGES
-end
-
 -- Euclidean tracks regenerate from their own params, so randomizing them
 -- would be undone on the next euclidean recompute.
 function Sequencer:_is_track_euclidean(track)
@@ -565,13 +561,11 @@ function Sequencer:randomize_tracks(include_drum_tracks)
   local stage = RANDOMIZE_STAGES[self._randomize_stage]
   local patternno = self:_get_pattern_number()
   local pattern_length = self:get_pattern_length()
-  local randomized = 0
   -- Taking over the drum tracks means holding the Grids drum map off them,
   -- otherwise the next Pattern X/Y change would overwrite the result.
   if include_drum_tracks then self._grids_suppressed = true end
   for track = 1, self.num_tracks do
     if not self:_is_track_generated(track, include_drum_tracks) then
-      randomized = randomized + 1
       -- Clear, then fill an exact number of randomly chosen steps
       for step = 1, pattern_length do
         self:set_trig(patternno, step, track, 0)
@@ -593,7 +587,6 @@ function Sequencer:randomize_tracks(include_drum_tracks)
   end
   UI.grid_dirty = true
   UI.screen_dirty = true
-  return self._randomize_stage, randomized
 end
 
 function Sequencer:recompute_euclidean_for_track(track)
