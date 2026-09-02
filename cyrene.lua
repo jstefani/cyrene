@@ -174,6 +174,39 @@ function _migrate_base_params()
   params:set("cy_base_params_saved", 1, true)
 end
 
+-- Randomize Pan: tracks 1-3 (kick, snare, hi-hat) always keep their pan;
+-- only tracks 4+ are randomized. Successive presses widen the spread in a
+-- 4-step cycle, then loop back to modest positions.
+--
+-- Each stage has a curve and a max width. A raw uniform value in [-1, 1] is
+-- shaped as sign(r) * |r|^curve * width. curve > 1 biases toward center,
+-- curve = 1 is uniform, curve < 1 biases outward. So stage 1 clusters near
+-- the middle and later stages make hard-panned values progressively more
+-- likely -- but never certain, since the full inner range stays reachable.
+local FIRST_RANDOMIZED_PAN_TRACK = 4
+local PAN_RANDOMIZE_STAGES = {
+  {curve = 2.5, width = 0.35}, -- 1: subtle, hugs the center
+  {curve = 1.6, width = 0.60}, -- 2: opening up
+  {curve = 1.1, width = 0.85}, -- 3: wide, near-uniform
+  {curve = 0.7, width = 1.00}, -- 4: full field, favors the edges
+}
+local pan_randomize_stage = 0
+
+function _randomize_pan()
+  -- Advance first, so the very first press uses stage 1.
+  pan_randomize_stage = (pan_randomize_stage % #PAN_RANDOMIZE_STAGES) + 1
+  local stage = PAN_RANDOMIZE_STAGES[pan_randomize_stage]
+  for track = FIRST_RANDOMIZED_PAN_TRACK, NUM_TRACKS do
+    local pan_id = track .. "_pan"
+    if params.lookup[pan_id] then
+      local raw = (math.random() * 2) - 1
+      local shaped = (raw < 0 and -1 or 1) * (math.abs(raw) ^ stage.curve) * stage.width
+      params:set(pan_id, util.clamp(shaped, -1, 1))
+    end
+  end
+  UIState.screen_dirty = true
+end
+
 local arc_device = arc.connect()
 local arcify = Arcify.new(arc_device, false)
 
@@ -255,6 +288,14 @@ local function init_params()
     end,
   }
   arcify:register("cy_global_pitch")
+
+  params:add_separator("Randomize Pan")
+  params:add {
+    type="trigger",
+    id="cy_randomize_pan",
+    name="Randomize Pan",
+    action=function() _randomize_pan() end,
+  }
 
   params:add_group("Effects", 6)
   Ack.add_effects_params() -- 6 params
