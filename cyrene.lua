@@ -17,12 +17,9 @@
 --  for more swing info)
 --
 -- Performance page:
--- K2 & K3 switch sections
--- E2 & E3 change values
--- Global pitch, filter,
---  and main output level
--- Hold K3 on section 2
---  to randomize the steps
+-- E2 changes global pitch
+-- E3 changes global filter
+-- K3 randomizes the steps
 --  of the programmed tracks
 --  (4 density stages, then
 --   loops back to sparse)
@@ -254,7 +251,10 @@ local function init_params()
     action=function(value) _apply_global_filter(value) end,
   }
   arcify:register("cy_global_filter")
-  -- Ack provides a main output level that Cyrene never exposed
+  -- Ack provides a main output level that Cyrene never exposed. It is not on
+  -- the Performance page (the system output_level next to the tempo on the
+  -- first page already covers master volume in practice), but it is free and
+  -- MIDI/arc mappable, so it stays available here.
   Ack.add_main_level_param() -- 1 param
   arcify:register("main_level")
 
