@@ -16,6 +16,14 @@
 -- (check README or wiki
 --  for more swing info)
 --
+-- Performance page:
+-- K2 & K3 switch sections
+-- E2 & E3 change values
+-- Global pitch, filter,
+--  and main output level
+-- Hold K3 on section 2
+--  to reset all to neutral
+--
 -- Pattern & Density page:
 -- K2 & K3 switch sections
 -- E2 & E3 change values
@@ -84,11 +92,13 @@ local current_version = "1.9.1"
 engine.name = 'Ack'
 
 local Ack = require 'ack/lib/ack'
+local ControlSpec = require 'controlspec'
 local UI = require 'ui'
 local Sequencer = require('cyrene/lib/sequencer')
 local MidiOut = require('cyrene/lib/midi_out')
 local PlaybackUI = require('cyrene/lib/ui/playback')
 local SwingUI = require('cyrene/lib/ui/swing')
+local PerformanceUI = require('cyrene/lib/ui/performance')
 local PatternAndDensityUI = require('cyrene/lib/ui/pattern_and_density')
 local MoreDensityUI = require('cyrene/lib/ui/more_density')
 local EuclideanUI = require('cyrene/lib/ui/euclidean')
@@ -120,7 +130,6 @@ local NUM_TRACKS = 7
 --
 -- Deriving from the base also means clamping at the edges of Ack's speed
 -- range is non-destructive: pitching back down restores the original speed.
-local ControlSpec = require 'controlspec'
 local global_pitch_spec = ControlSpec.new(-24, 24, 'lin', 0, 0, 'st')
 local is_applying_global_pitch = false
 
@@ -207,6 +216,67 @@ function _randomize_pan()
   UIState.screen_dirty = true
 end
 
+-- Global filter: a per-octave offset applied on top of each track's own
+-- filter cutoff. Cutoff is a frequency, so the offset is multiplicative
+-- rather than a flat Hz shift, and each track keeps a "base" cutoff so
+-- sweeping to the extremes and back is non-destructive (same approach as
+-- the global pitch control).
+local global_filter_spec = ControlSpec.new(-36, 36, 'lin', 0, 0, 'st')
+-- Each track's unshifted base cutoff lives in a hidden param so that the
+-- base, not the derived value, is what gets written to the PSET.
+-- params:read() is not silent -- it fires actions as it loads -- so saving
+-- the shifted cutoff would apply the offset a second time on load and
+-- compound across save/load cycles.
+local is_applying_global_filter = false
+
+local function _base_cutoff_id(track) return "cy_" .. track .. "_base_cutoff" end
+
+local function _get_base_cutoff(track)
+  local id = _base_cutoff_id(track)
+  if params.lookup[id] then return params:get(id) end
+  return params:get(track .. "_filter_cutoff")
+end
+
+function _apply_global_filter(value)
+  local ratio = 2 ^ (value / 12)
+  is_applying_global_filter = true
+  for track = 1, NUM_TRACKS do
+    local cutoff_id = track .. "_filter_cutoff"
+    if params.lookup[cutoff_id] then
+      local spec = params:lookup_param(cutoff_id).controlspec
+      params:set(cutoff_id, util.clamp(_get_base_cutoff(track) * ratio, spec.minval, spec.maxval))
+    end
+  end
+  is_applying_global_filter = false
+  UIState.params_dirty = true
+  UIState.screen_dirty = true
+end
+
+-- A direct edit to a track's cutoff rebases it at the current global offset.
+function _track_cutoff_changed(track, value)
+  if is_applying_global_filter then return end
+  local offset = params.lookup["cy_global_filter"]
+    and params:get("cy_global_filter") or 0
+  local id = _base_cutoff_id(track)
+  if params.lookup[id] then
+    params:set(id, value / (2 ^ (offset / 12)), true) -- silent: no re-derive
+  end
+end
+
+-- PSETs written before the base params existed store the already-shifted
+-- cutoff; divide the saved offset back out once so it is not applied twice.
+function _migrate_base_cutoffs()
+  if params:get("cy_base_cutoffs_saved") == 1 then return end
+  local ratio = 2 ^ (params:get("cy_global_filter") / 12)
+  for track = 1, NUM_TRACKS do
+    local id = _base_cutoff_id(track)
+    if params.lookup[id] then
+      params:set(id, params:get(track .. "_filter_cutoff") / ratio, true)
+    end
+  end
+  params:set("cy_base_cutoffs_saved", 1, true)
+end
+
 local arc_device = arc.connect()
 local arcify = Arcify.new(arc_device, false)
 
@@ -218,13 +288,13 @@ local function init_params()
     elseif track == 2 then group_name = "Snare"
     elseif track == 3 then group_name = "Hi-Hat"
     end
-    params:add_group(group_name, 28)
+    params:add_group(group_name, 29)
     -- All the pages together add 5 params per track
     sequencer:add_params_for_track(track, arcify)
     Ack.add_channel_params(track) -- 22 params
-    -- Hidden param holding the unshifted base speed for this track. This is
-    -- what lands in the PSET, so the global pitch offset is re-derived on
-    -- load instead of being baked into the saved value twice.
+    -- Hidden params holding this track's unshifted base speed and cutoff.
+    -- These are what land in the PSET, so the global pitch/filter offsets
+    -- are re-derived on load instead of being baked in twice.
     params:add {
       type="control",
       id=_base_speed_id(track),
@@ -232,11 +302,24 @@ local function init_params()
       controlspec=params:lookup_param(track.."_speed").controlspec,
     }
     params:hide(params.lookup[_base_speed_id(track)])
+    params:add {
+      type="control",
+      id=_base_cutoff_id(track),
+      name=track..": base cutoff",
+      controlspec=params:lookup_param(track.."_filter_cutoff").controlspec,
+    }
+    params:hide(params.lookup[_base_cutoff_id(track)])
     -- Track direct edits to speed so global pitch stays relative to them
     local ack_speed_action = params:lookup_param(track.."_speed").action
     params:set_action(track.."_speed", function(value)
       ack_speed_action(value)
       _track_speed_changed(track, value)
+    end)
+    -- Track direct cutoff edits so the global filter stays relative to them
+    local ack_cutoff_action = params:lookup_param(track.."_filter_cutoff").action
+    params:set_action(track.."_filter_cutoff", function(value)
+      ack_cutoff_action(value)
+      _track_cutoff_changed(track, value)
     end)
     -- all params except the file are arcifyed
     arcify:register(track.."_start_pos")
@@ -267,6 +350,17 @@ local function init_params()
     type="number",
     id="cy_base_params_saved",
     name="Base Params Saved",
+    min=0,
+    max=1,
+    default=0,
+  }
+  params:hide(params.lookup["cy_base_params_saved"])
+
+  -- Marks a PSET as containing the hidden base cutoff params.
+  params:add {
+    type="number",
+    id="cy_base_cutoffs_saved",
+    name="Base Cutoffs Saved",
     min=0,
     max=1,
     default=0,
@@ -310,6 +404,24 @@ local function init_params()
       GridUI.set_monobright(value)
     end,
   }
+
+  params:hide(params.lookup["cy_base_cutoffs_saved"])
+
+  params:add_separator("Performance")
+  params:add {
+    type="control",
+    id="cy_global_filter",
+    name="Global Filter",
+    controlspec=global_filter_spec,
+    formatter=function(param)
+      return string.format("%+.1f st", param:get())
+    end,
+    action=function(value) _apply_global_filter(value) end,
+  }
+  arcify:register("cy_global_filter")
+  -- Ack provides a main output level that Cyrene never exposed
+  Ack.add_main_level_param() -- 1 param
+  arcify:register("main_level")
 
   params:add_group("Effects", 6)
   Ack.add_effects_params() -- 6 params
@@ -388,6 +500,7 @@ function init()
   pages_table = {
     PlaybackUI:new(),
     SwingUI:new(),
+    PerformanceUI:new(),
     PatternAndDensityUI:new(),
     MoreDensityUI:new(),
     EuclideanUI:new(sequencer),
@@ -405,11 +518,13 @@ function init()
   end
   params:set("cyrene_version", current_version)
   _migrate_base_params()
+  _migrate_base_cutoffs()
   params:bang()
-  -- Re-derive the audible speeds from the saved base values. This runs after
-  -- bang() so it wins regardless of the order bang() used (ParamSet:bang
-  -- iterates with pairs(), which is unordered).
+  -- Re-derive the audible speeds and cutoffs from the saved base values.
+  -- This runs after bang() so it wins regardless of the order bang() used
+  -- (ParamSet:bang iterates with pairs(), which is unordered).
   _apply_global_pitch(params:get("cy_global_pitch"))
+  _apply_global_filter(params:get("cy_global_filter"))
 
   _set_encoder_sensitivities()
 
@@ -430,9 +545,10 @@ function init()
 end
 
 function cleanup()
-  -- Mark this PSET as carrying base speed values so it is not treated as a
-  -- pre-base-param PSET when it is loaded back.
+  -- Mark this PSET as carrying base speed/cutoff values so it is not
+  -- treated as a pre-base-param PSET when it is loaded back.
   params:set("cy_base_params_saved", 1, true)
+  params:set("cy_base_cutoffs_saved", 1, true)
   params:write()
 
   sequencer:save_patterns()
