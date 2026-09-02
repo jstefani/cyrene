@@ -121,8 +121,20 @@ local NUM_TRACKS = 7
 -- sweeping to the extremes and back is non-destructive (same approach as
 -- the global pitch control).
 local global_filter_spec = ControlSpec.new(-36, 36, 'lin', 0, 0, 'st')
-local base_cutoffs = {}
+-- Each track's unshifted base cutoff lives in a hidden param so that the
+-- base, not the derived value, is what gets written to the PSET.
+-- params:read() is not silent -- it fires actions as it loads -- so saving
+-- the shifted cutoff would apply the offset a second time on load and
+-- compound across save/load cycles.
 local is_applying_global_filter = false
+
+local function _base_cutoff_id(track) return "cy_" .. track .. "_base_cutoff" end
+
+local function _get_base_cutoff(track)
+  local id = _base_cutoff_id(track)
+  if params.lookup[id] then return params:get(id) end
+  return params:get(track .. "_filter_cutoff")
+end
 
 function _apply_global_filter(value)
   local ratio = 2 ^ (value / 12)
@@ -130,10 +142,8 @@ function _apply_global_filter(value)
   for track = 1, NUM_TRACKS do
     local cutoff_id = track .. "_filter_cutoff"
     if params.lookup[cutoff_id] then
-      local base = base_cutoffs[track] or params:get(cutoff_id)
-      base_cutoffs[track] = base
       local spec = params:lookup_param(cutoff_id).controlspec
-      params:set(cutoff_id, util.clamp(base * ratio, spec.minval, spec.maxval))
+      params:set(cutoff_id, util.clamp(_get_base_cutoff(track) * ratio, spec.minval, spec.maxval))
     end
   end
   is_applying_global_filter = false
@@ -141,22 +151,29 @@ function _apply_global_filter(value)
   UIState.screen_dirty = true
 end
 
-function _recover_base_cutoffs()
-  local ratio = 2 ^ (params:get("cy_global_filter") / 12)
-  for track = 1, NUM_TRACKS do
-    local cutoff_id = track .. "_filter_cutoff"
-    if params.lookup[cutoff_id] then
-      base_cutoffs[track] = params:get(cutoff_id) / ratio
-    end
-  end
-end
-
 -- A direct edit to a track's cutoff rebases it at the current global offset.
 function _track_cutoff_changed(track, value)
   if is_applying_global_filter then return end
   local offset = params.lookup["cy_global_filter"]
     and params:get("cy_global_filter") or 0
-  base_cutoffs[track] = value / (2 ^ (offset / 12))
+  local id = _base_cutoff_id(track)
+  if params.lookup[id] then
+    params:set(id, value / (2 ^ (offset / 12)), true) -- silent: no re-derive
+  end
+end
+
+-- PSETs written before the base params existed store the already-shifted
+-- cutoff; divide the saved offset back out once so it is not applied twice.
+function _migrate_base_cutoffs()
+  if params:get("cy_base_cutoffs_saved") == 1 then return end
+  local ratio = 2 ^ (params:get("cy_global_filter") / 12)
+  for track = 1, NUM_TRACKS do
+    local id = _base_cutoff_id(track)
+    if params.lookup[id] then
+      params:set(id, params:get(track .. "_filter_cutoff") / ratio, true)
+    end
+  end
+  params:set("cy_base_cutoffs_saved", 1, true)
 end
 
 local arc_device = arc.connect()
@@ -170,10 +187,18 @@ local function init_params()
     elseif track == 2 then group_name = "Snare"
     elseif track == 3 then group_name = "Hi-Hat"
     end
-    params:add_group(group_name, 27)
+    params:add_group(group_name, 28)
     -- All the pages together add 5 params per track
     sequencer:add_params_for_track(track, arcify)
     Ack.add_channel_params(track) -- 22 params
+    -- Hidden param holding this track's unshifted base cutoff (see above)
+    params:add {
+      type="control",
+      id=_base_cutoff_id(track),
+      name=track..": base cutoff",
+      controlspec=params:lookup_param(track.."_filter_cutoff").controlspec,
+    }
+    params:hide(params.lookup[_base_cutoff_id(track)])
     -- Track direct cutoff edits so the global filter stays relative to them
     local ack_cutoff_action = params:lookup_param(track.."_filter_cutoff").action
     params:set_action(track.."_filter_cutoff", function(value)
@@ -203,6 +228,17 @@ local function init_params()
     arcify:register(track.."_delay_send")
     arcify:register(track.."_reverb_send")
   end
+  -- Marks a PSET as containing the hidden base cutoff params.
+  params:add {
+    type="number",
+    id="cy_base_cutoffs_saved",
+    name="Base Cutoffs Saved",
+    min=0,
+    max=1,
+    default=0,
+  }
+  params:hide(params.lookup["cy_base_cutoffs_saved"])
+
   params:add_separator("Performance")
   params:add {
     type="control",
@@ -313,10 +349,11 @@ function init()
     _upgrade_to_1_6_0()
   end
   params:set("cyrene_version", current_version)
-  -- Saved cutoffs already include the saved global filter offset, so recover
-  -- each track's base before bang() re-applies it.
-  _recover_base_cutoffs()
+  _migrate_base_cutoffs()
   params:bang()
+  -- Re-derive cutoffs from the saved bases after bang(), so this does not
+  -- depend on bang() ordering (ParamSet:bang iterates with pairs()).
+  _apply_global_filter(params:get("cy_global_filter"))
 
   _set_encoder_sensitivities()
 
@@ -337,6 +374,7 @@ function init()
 end
 
 function cleanup()
+  params:set("cy_base_cutoffs_saved", 1, true)
   params:write()
 
   sequencer:save_patterns()
