@@ -14,6 +14,7 @@ local active_lo_level = 6
 local inactive_hi_level = 3
 local inactive_lo_level = 1
 local font_size = 16
+local HOLD_DURATION = 0.7
 
 local PerformanceUI = {}
 
@@ -66,26 +67,30 @@ function PerformanceUI:enc(n, delta, sequencer)
 end
 
 function PerformanceUI:key(n, z, sequencer)
-  -- Hold K3 on the second section to reset all three to neutral
-  if self._section == 1 and n == 3 then
+  -- K3 acts on key-up throughout, because on the second section the action
+  -- depends on how long it was held: a hold resets all three globals to
+  -- neutral, a short press switches section like it does everywhere else.
+  if n == 3 then
     if z == 1 then
       self._k3_down_time = util.time()
       return
-    elseif self._k3_down_time then
-      local held = util.time() - self._k3_down_time
-      self._k3_down_time = nil
-      if held > 0.7 then
-        if self:_has_pitch() then params:set("cy_global_pitch", 0) end
-        params:set("cy_global_filter", 0)
-        params:set("main_level", 0)
-        UIState.screen_dirty = true
-        return
-      end
     end
+    local held = self._k3_down_time and (util.time() - self._k3_down_time) or 0
+    self._k3_down_time = nil
+    if self._section == 1 and held > HOLD_DURATION then
+      if self:_has_pitch() then params:set("cy_global_pitch", 0) end
+      params:set("cy_global_filter", 0)
+      params:set("main_level", 0)
+      UIState.params_dirty = true
+      UIState.screen_dirty = true
+      return
+    end
+    self._section = (self._section + 1 + 2) % 2
+    self:_update_active_section()
+    return
   end
-  if (n == 2 and z == 0) or (n == 3 and z == 1) then
-    local direction = n == 2 and -1 or 1
-    self._section = (self._section + direction + 2) % 2
+  if n == 2 and z == 0 then
+    self._section = (self._section - 1 + 2) % 2
     self:_update_active_section()
   end
 end
