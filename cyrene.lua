@@ -106,14 +106,31 @@ local ui_refresh_metro
 local NUM_TRACKS = 7
 
 -- Global pitch: a semitone offset applied on top of each track's own speed.
--- We keep each track's unshifted "base" speed and always derive the played
--- speed as base * 2^(semitones/12). Deriving from the base (rather than
--- accumulating deltas) means clamping at the edges of Ack's speed range is
--- not destructive: pitching back down restores the original speed.
+--
+-- Each track's unshifted "base" speed is held in its own hidden param
+-- (cy_<n>_base_speed) so that the base is what gets written to the PSET.
+-- The audible <n>_speed is always derived as base * 2^(semitones/12).
+--
+-- Storing the base rather than the derived value is what makes reload
+-- correct. params:read() is NOT silent -- it fires each param's action as
+-- it loads -- so if the shifted speed were the saved value, loading it and
+-- then applying the saved offset on top would shift it twice, compounding
+-- on every save/load cycle until it hit the clamp. With the base saved,
+-- the offset is re-derived from scratch and is idempotent.
+--
+-- Deriving from the base also means clamping at the edges of Ack's speed
+-- range is non-destructive: pitching back down restores the original speed.
 local ControlSpec = require 'controlspec'
 local global_pitch_spec = ControlSpec.new(-24, 24, 'lin', 0, 0, 'st')
-local base_speeds = {}
 local is_applying_global_pitch = false
+
+local function _base_speed_id(track) return "cy_" .. track .. "_base_speed" end
+
+local function _get_base_speed(track)
+  local id = _base_speed_id(track)
+  if params.lookup[id] then return params:get(id) end
+  return params:get(track .. "_speed")
+end
 
 function _apply_global_pitch(value)
   local ratio = 2 ^ (value / 12)
@@ -121,24 +138,11 @@ function _apply_global_pitch(value)
   for track = 1, NUM_TRACKS do
     local speed_id = track .. "_speed"
     if params.lookup[speed_id] then
-      local base = base_speeds[track] or params:get(speed_id)
-      base_speeds[track] = base
       local spec = params:lookup_param(speed_id).controlspec
-      params:set(speed_id, util.clamp(base * ratio, spec.minval, spec.maxval))
+      params:set(speed_id, util.clamp(_get_base_speed(track) * ratio, spec.minval, spec.maxval))
     end
   end
   is_applying_global_pitch = false
-end
-
--- Recover each track's base speed from the loaded (already-shifted) speeds.
-function _recover_base_speeds()
-  local ratio = 2 ^ (params:get("cy_global_pitch") / 12)
-  for track = 1, NUM_TRACKS do
-    local speed_id = track .. "_speed"
-    if params.lookup[speed_id] then
-      base_speeds[track] = params:get(speed_id) / ratio
-    end
-  end
 end
 
 -- When the user edits a track's speed directly, that becomes its new base
@@ -148,7 +152,26 @@ function _track_speed_changed(track, value)
   -- cy_global_pitch is registered after the track groups, so it may not
   -- exist yet the first time an Ack speed action fires.
   local pitch = params.lookup["cy_global_pitch"] and params:get("cy_global_pitch") or 0
-  base_speeds[track] = value / (2 ^ (pitch / 12))
+  local id = _base_speed_id(track)
+  if params.lookup[id] then
+    params:set(id, value / (2 ^ (pitch / 12)), true) -- silent: no re-derive
+  end
+end
+
+-- A PSET written before the base params existed stores the already-shifted
+-- speed and carries no base values. cy_base_params_saved is written as 1 by
+-- any PSET that does have them, so if it comes back 0 we divide the saved
+-- offset back out once, rather than shifting the value a second time.
+function _migrate_base_params()
+  if params:get("cy_base_params_saved") == 1 then return end
+  local pitch_ratio = 2 ^ (params:get("cy_global_pitch") / 12)
+  for track = 1, NUM_TRACKS do
+    local base_speed = _base_speed_id(track)
+    if params.lookup[base_speed] then
+      params:set(base_speed, params:get(track .. "_speed") / pitch_ratio, true)
+    end
+  end
+  params:set("cy_base_params_saved", 1, true)
 end
 
 local arc_device = arc.connect()
@@ -162,10 +185,20 @@ local function init_params()
     elseif track == 2 then group_name = "Snare"
     elseif track == 3 then group_name = "Hi-Hat"
     end
-    params:add_group(group_name, 27)
+    params:add_group(group_name, 28)
     -- All the pages together add 5 params per track
     sequencer:add_params_for_track(track, arcify)
     Ack.add_channel_params(track) -- 22 params
+    -- Hidden param holding the unshifted base speed for this track. This is
+    -- what lands in the PSET, so the global pitch offset is re-derived on
+    -- load instead of being baked into the saved value twice.
+    params:add {
+      type="control",
+      id=_base_speed_id(track),
+      name=track..": base speed",
+      controlspec=params:lookup_param(track.."_speed").controlspec,
+    }
+    params:hide(params.lookup[_base_speed_id(track)])
     -- Track direct edits to speed so global pitch stays relative to them
     local ack_speed_action = params:lookup_param(track.."_speed").action
     params:set_action(track.."_speed", function(value)
@@ -195,6 +228,18 @@ local function init_params()
     arcify:register(track.."_delay_send")
     arcify:register(track.."_reverb_send")
   end
+  -- Marks a PSET as containing the hidden base speed params.
+  -- Absent (0) means the PSET predates them and needs migrating.
+  params:add {
+    type="number",
+    id="cy_base_params_saved",
+    name="Base Params Saved",
+    min=0,
+    max=1,
+    default=0,
+  }
+  params:hide(params.lookup["cy_base_params_saved"])
+
   params:add_separator("Global Pitch")
   params:add {
     type="control",
@@ -304,10 +349,12 @@ function init()
     _upgrade_to_1_6_0()
   end
   params:set("cyrene_version", current_version)
-  -- Saved per-track speeds already include the saved global pitch offset,
-  -- so recover each track's base speed before bang() re-applies the offset.
-  _recover_base_speeds()
+  _migrate_base_params()
   params:bang()
+  -- Re-derive the audible speeds from the saved base values. This runs after
+  -- bang() so it wins regardless of the order bang() used (ParamSet:bang
+  -- iterates with pairs(), which is unordered).
+  _apply_global_pitch(params:get("cy_global_pitch"))
 
   _set_encoder_sensitivities()
 
@@ -328,6 +375,9 @@ function init()
 end
 
 function cleanup()
+  -- Mark this PSET as carrying base speed values so it is not treated as a
+  -- pre-base-param PSET when it is loaded back.
+  params:set("cy_base_params_saved", 1, true)
   params:write()
 
   sequencer:save_patterns()
