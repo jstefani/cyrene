@@ -27,6 +27,20 @@ local MONO_PLAYPOS_LEVEL = 15
 local MONO_INACTIVE_ALT_LEVEL = 15
 local MONO_INACTIVE_PAGE_LEVEL = 15
 
+-- Trig probability at or above which a monobright grid lights the step.
+--
+-- Without a threshold, every nonzero probability would light at full
+-- brightness. The Grids drum map writes a nonzero value to nearly every
+-- step of tracks 1-3 -- around 90% of them -- so the grid would read as
+-- almost completely full, even though most of those steps are too unlikely
+-- to fire. A varibright grid does not have this problem: those steps render
+-- at levels 3-7, dim enough to read as background.
+--
+-- 159 is the trig value at which the varibright curve first reaches level 8,
+-- i.e. where a step starts looking clearly lit rather than shaded, so the
+-- monobright display shows roughly what a varibright user perceives.
+local MONO_TRIG_THRESHOLD = 159
+
 -- Serial prefixes of grids without variable brightness. Monome serials are
 -- model-prefixed: the 40h series and the pre-2011 m64/m128/m256 walnut and
 -- greyscale editions are all monobright. Varibright grids (2011+) report
@@ -269,7 +283,11 @@ function Trigs.refresh_grid_button(x, y, sequencer)
   -- All rows that aren't the bottom row show triggers if active, or the play position otherwise
   local trig_x = Grid._sequencer_pos(x)
   local trig_level = y ~= 8 and sequencer:trig_level(params:get("cy_pattern"), trig_x, y) or 0
-  if trig_level == 0 then
+  -- On a monobright grid, a step too unlikely to fire is shown as empty
+  -- rather than at full brightness (see MONO_TRIG_THRESHOLD).
+  local shows_as_empty = trig_level == 0
+    or (Grid.is_monobright and trig_level < MONO_TRIG_THRESHOLD)
+  if shows_as_empty then
     -- If there's no trigger in the slot, show the playhead if it's in our column, otherwise show empty
     if trig_x-1 == sequencer.playpos then
       Grid.connected_grid:led(x, y, Grid._playpos_level())
