@@ -67,7 +67,13 @@ function PerformanceUI:_update_ui_from_params()
   else
     self.pitch_val_label.text = "--"
   end
-  self.filter_val_label.text = string.format("%+d", util.round(params:get("cy_global_filter")))
+  local filter = params:get("cy_global_filter")
+  if math.abs(filter) < 0.5 then
+    self.filter_val_label.text = "OFF"
+  else
+    self.filter_val_label.text = string.format("%s%d",
+      filter > 0 and "HP" or "LP", util.round(math.abs(filter)))
+  end
 end
 
 function PerformanceUI:redraw(sequencer)
