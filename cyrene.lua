@@ -19,10 +19,16 @@
 -- Performance page:
 -- E2 changes global pitch
 -- E3 changes global filter
--- K3 randomizes the steps
---  of the programmed tracks
---  (4 density stages, then
---   loops back to sparse)
+-- K2 randomizes tracks 4-7
+-- K3 randomizes all tracks,
+--  kick/snare/hat included
+--  (holds the drum map off
+--   them until you next
+--   move Pattern X/Y)
+-- Both cycle 4 density
+--  stages, then loop back
+-- Euclidean tracks are
+--  never randomized
 --
 -- Pattern & Density page:
 -- K2 & K3 switch sections

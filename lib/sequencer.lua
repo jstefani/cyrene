@@ -449,6 +449,11 @@ function Sequencer.u8mix(a, b, mix)
 end
 
 function Sequencer:set_grids_xy(patternno, x, y, force)
+  -- A deliberate move of Pattern X/Y (or an explicit forced rebuild) means
+  -- the user wants the drum map back, so drop any randomization hold.
+  if self._grids_suppressed and (force or x ~= self.grids_x or y ~= self.grids_y) then
+    self._grids_suppressed = false
+  end
   -- Short-circuit this expensive operation if there's no change
   local euclidean_kick = params:get(EuclideanUI.param_id_prefix_for_track(1).."_euclidean_enabled") == 2
   local euclidean_snare = params:get(EuclideanUI.param_id_prefix_for_track(2).."_euclidean_enabled") == 2
@@ -476,7 +481,7 @@ function Sequencer:set_grids_xy(patternno, x, y, force)
   local d_map = DrumMap.map[j + 1][i + 1]
   for track=1,3 do
     local euclidean_mode = params:get(EuclideanUI.param_id_prefix_for_track(track).."_euclidean_enabled") == 2
-    if not euclidean_mode then
+    if not euclidean_mode and not self._grids_suppressed then
       local track_offset = ((track - 1) * DrumMap.PATTERN_LENGTH)
       for step=1,pattern_length do
         local step_offset = (((step - 1) * step_offset_multiplier) % DrumMap.PATTERN_LENGTH) + 1
@@ -500,13 +505,21 @@ function Sequencer:set_grids_xy(patternno, x, y, force)
   self._euclidean_hat = euclidean_hat
 end
 
--- Randomize the programmed steps of every track this script actually owns.
+-- Randomize the programmed steps.
 --
--- Tracks 1-3 are written by the Grids drum map (set_grids_xy) and any track
--- with euclidean mode on is written by recompute_euclidean_for_track, so
--- randomizing either would be pointless -- the next Pattern X/Y nudge or
--- euclidean recompute would overwrite it. Only the remaining tracks are
--- touched.
+-- include_drum_tracks selects the scope: false randomizes only the tracks
+-- Cyrene does not generate (4 and up), true also takes over tracks 1-3.
+--
+-- Tracks 1-3 are normally written by the Grids drum map in set_grids_xy,
+-- which runs on every tick, so a randomized pattern there would be restored
+-- as soon as Pattern X/Y changed. Including them therefore sets
+-- _grids_suppressed, which holds the drum map off those tracks until the
+-- user deliberately moves X/Y again -- that clears the flag and hands the
+-- kick, snare and hat back to Grids.
+--
+-- Tracks with euclidean mode on are skipped in both modes: euclidean
+-- recomputes from its own params on any change, so there is no way to hold
+-- it off without fighting the euclidean page.
 --
 -- Presses cycle through four stages of increasing density, then loop back.
 --
@@ -534,20 +547,30 @@ function Sequencer:randomize_stage_count()
   return #RANDOMIZE_STAGES
 end
 
--- Is this track's step data owned by Grids or euclidean rather than the user?
-function Sequencer:_is_track_generated(track)
-  if params:get("cy_"..track.."_euclidean_enabled") == 2 then return true end
-  return track <= 3
+-- Euclidean tracks regenerate from their own params, so randomizing them
+-- would be undone on the next euclidean recompute.
+function Sequencer:_is_track_euclidean(track)
+  return params:get("cy_"..track.."_euclidean_enabled") == 2
 end
 
-function Sequencer:randomize_tracks()
+-- Is this track off limits for a randomize of the given scope?
+function Sequencer:_is_track_generated(track, include_drum_tracks)
+  if self:_is_track_euclidean(track) then return true end
+  if track <= 3 and not include_drum_tracks then return true end
+  return false
+end
+
+function Sequencer:randomize_tracks(include_drum_tracks)
   self._randomize_stage = ((self._randomize_stage or 0) % #RANDOMIZE_STAGES) + 1
   local stage = RANDOMIZE_STAGES[self._randomize_stage]
   local patternno = self:_get_pattern_number()
   local pattern_length = self:get_pattern_length()
   local randomized = 0
+  -- Taking over the drum tracks means holding the Grids drum map off them,
+  -- otherwise the next Pattern X/Y change would overwrite the result.
+  if include_drum_tracks then self._grids_suppressed = true end
   for track = 1, self.num_tracks do
-    if not self:_is_track_generated(track) then
+    if not self:_is_track_generated(track, include_drum_tracks) then
       randomized = randomized + 1
       -- Clear, then fill an exact number of randomly chosen steps
       for step = 1, pattern_length do
