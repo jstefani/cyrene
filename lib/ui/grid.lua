@@ -123,7 +123,8 @@ function Grid._sequencer_pos(grid_x)
 end
 
 function Grid._last_page_number(sequencer)
-  return math.ceil(sequencer:get_pattern_length() / Grid.grid_width)
+  -- Page far enough to reach the end of the longest track
+  return math.ceil(sequencer:get_max_track_length() / Grid.grid_width)
 end
 
 ------------------
@@ -162,9 +163,14 @@ function Trigs.refresh_grid_button(x, y, sequencer)
   -- All rows that aren't the bottom row show triggers if active, or the play position otherwise
   local trig_x = Grid._sequencer_pos(x)
   local trig_level = y ~= 8 and sequencer:trig_level(params:get("cy_pattern"), trig_x, y) or 0
+  -- Each track has its own playhead and its own length, so both the playhead
+  -- column and the end-of-pattern fade are per row. The bottom row has no
+  -- track of its own, so it follows the master position and length.
+  local track_playpos = (y ~= 8 and sequencer.playposes) and sequencer.playposes[y] or sequencer.playpos
+  local track_length = y ~= 8 and sequencer:get_track_length(y) or sequencer:get_pattern_length()
   if trig_level == 0 then
     -- If there's no trigger in the slot, show the playhead if it's in our column, otherwise show empty
-    if trig_x-1 == sequencer.playpos then
+    if trig_x-1 == track_playpos then
       Grid.connected_grid:led(x, y, PLAYPOS_LEVEL)
     else
       Grid.connected_grid:led(x, y, CLEAR_LEVEL)
@@ -172,8 +178,8 @@ function Trigs.refresh_grid_button(x, y, sequencer)
   else
     -- Show the likelihood of a trigger firing via its brightness (down to some minimum brightness)
     local grid_trig_level = math.ceil(util.linexp(0, 255, MIN_TRIG_LEVEL, TRIG_LEVEL, trig_level))
-    -- Fade out the columns beyond the end of the pattern
-    local is_beyond_pattern_end = trig_x > sequencer:get_pattern_length()
+    -- Fade out the columns beyond the end of this track's pattern
+    local is_beyond_pattern_end = trig_x > track_length
     grid_trig_level = is_beyond_pattern_end and math.ceil(grid_trig_level * 0.33) or grid_trig_level
     Grid.connected_grid:led(x, y, grid_trig_level)
   end
@@ -213,15 +219,18 @@ function Probabilities.refresh_grid_button(x, y, sequencer)
     local row_for_level = math.floor(-1 * (((trig_level/255) * 6) - 7))
     show_playhead = y ~= row_for_level
   end
+  -- This mode shows one track across every row, so it follows that track's
+  -- playhead and length rather than the master.
+  local track_playpos = sequencer.playposes and sequencer.playposes[Probabilities.track] or sequencer.playpos
   if show_playhead then
     -- If there's no trigger in the slot, show the playhead if it's in our column, otherwise show empty
-    if trig_x-1 == sequencer.playpos then
+    if trig_x-1 == track_playpos then
       Grid.connected_grid:led(x, y, PLAYPOS_LEVEL)
     else
       Grid.connected_grid:led(x, y, CLEAR_LEVEL)
     end
   else
-    local is_beyond_pattern_end = trig_x > sequencer:get_pattern_length()
+    local is_beyond_pattern_end = trig_x > sequencer:get_track_length(Probabilities.track)
     grid_trig_level = is_beyond_pattern_end and math.ceil(TRIG_LEVEL * 0.33) or TRIG_LEVEL
     Grid.connected_grid:led(x, y, grid_trig_level)
   end
