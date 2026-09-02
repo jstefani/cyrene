@@ -105,6 +105,52 @@ local pages_table
 local ui_refresh_metro
 local NUM_TRACKS = 7
 
+-- Global pitch: a semitone offset applied on top of each track's own speed.
+-- We keep each track's unshifted "base" speed and always derive the played
+-- speed as base * 2^(semitones/12). Deriving from the base (rather than
+-- accumulating deltas) means clamping at the edges of Ack's speed range is
+-- not destructive: pitching back down restores the original speed.
+local ControlSpec = require 'controlspec'
+local global_pitch_spec = ControlSpec.new(-24, 24, 'lin', 0, 0, 'st')
+local base_speeds = {}
+local is_applying_global_pitch = false
+
+function _apply_global_pitch(value)
+  local ratio = 2 ^ (value / 12)
+  is_applying_global_pitch = true
+  for track = 1, NUM_TRACKS do
+    local speed_id = track .. "_speed"
+    if params.lookup[speed_id] then
+      local base = base_speeds[track] or params:get(speed_id)
+      base_speeds[track] = base
+      local spec = params:lookup_param(speed_id).controlspec
+      params:set(speed_id, util.clamp(base * ratio, spec.minval, spec.maxval))
+    end
+  end
+  is_applying_global_pitch = false
+end
+
+-- Recover each track's base speed from the loaded (already-shifted) speeds.
+function _recover_base_speeds()
+  local ratio = 2 ^ (params:get("cy_global_pitch") / 12)
+  for track = 1, NUM_TRACKS do
+    local speed_id = track .. "_speed"
+    if params.lookup[speed_id] then
+      base_speeds[track] = params:get(speed_id) / ratio
+    end
+  end
+end
+
+-- When the user edits a track's speed directly, that becomes its new base
+-- (interpreted at the current global pitch).
+function _track_speed_changed(track, value)
+  if is_applying_global_pitch then return end
+  -- cy_global_pitch is registered after the track groups, so it may not
+  -- exist yet the first time an Ack speed action fires.
+  local pitch = params.lookup["cy_global_pitch"] and params:get("cy_global_pitch") or 0
+  base_speeds[track] = value / (2 ^ (pitch / 12))
+end
+
 local arc_device = arc.connect()
 local arcify = Arcify.new(arc_device, false)
 
@@ -120,6 +166,12 @@ local function init_params()
     -- All the pages together add 5 params per track
     sequencer:add_params_for_track(track, arcify)
     Ack.add_channel_params(track) -- 22 params
+    -- Track direct edits to speed so global pitch stays relative to them
+    local ack_speed_action = params:lookup_param(track.."_speed").action
+    params:set_action(track.."_speed", function(value)
+      ack_speed_action(value)
+      _track_speed_changed(track, value)
+    end)
     -- all params except the file are arcifyed
     arcify:register(track.."_start_pos")
     arcify:register(track.."_end_pos")
@@ -143,6 +195,22 @@ local function init_params()
     arcify:register(track.."_delay_send")
     arcify:register(track.."_reverb_send")
   end
+  params:add_separator("Global Pitch")
+  params:add {
+    type="control",
+    id="cy_global_pitch",
+    name="Global Pitch",
+    controlspec=global_pitch_spec,
+    formatter=function(param)
+      local val = param:get()
+      return string.format("%+.2f st", val)
+    end,
+    action=function(value)
+      _apply_global_pitch(value)
+    end,
+  }
+  arcify:register("cy_global_pitch")
+
   params:add_group("Effects", 6)
   Ack.add_effects_params() -- 6 params
   arcify:register("delay_time")
@@ -236,6 +304,9 @@ function init()
     _upgrade_to_1_6_0()
   end
   params:set("cyrene_version", current_version)
+  -- Saved per-track speeds already include the saved global pitch offset,
+  -- so recover each track's base speed before bang() re-applies the offset.
+  _recover_base_speeds()
   params:bang()
 
   _set_encoder_sensitivities()
