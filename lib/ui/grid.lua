@@ -19,27 +19,18 @@ local ACTIVE_PAGE_LEVEL = 15
 local INACTIVE_PAGE_LEVEL = 4
 local CLEAR_LEVEL = 0
 
--- On a monobright grid every lit LED is full brightness, so the dim levels
--- above are pushed up to 15 and brightness can no longer encode anything.
-local MONO_TRIG_LEVEL = 15
-local MONO_MIN_TRIG_LEVEL = 15
+-- On a monobright grid the hardware lights any level >= 8 at full brightness
+-- and treats anything below as off, so these UI elements -- all dimmer than
+-- that -- would be invisible. They are raised to 15 in monobright mode.
+--
+-- Trig brightness is deliberately NOT adjusted: it already encodes
+-- probability across levels 2-15, and the hardware's own threshold means a
+-- monobright grid shows exactly the steps a varibright grid renders as
+-- clearly lit. Overriding it would only make unlikely steps look certain.
 local MONO_PLAYPOS_LEVEL = 15
 local MONO_INACTIVE_ALT_LEVEL = 15
 local MONO_INACTIVE_PAGE_LEVEL = 15
 
--- Trig probability at or above which a monobright grid lights the step.
---
--- Without a threshold, every nonzero probability would light at full
--- brightness. The Grids drum map writes a nonzero value to nearly every
--- step of tracks 1-3 -- around 90% of them -- so the grid would read as
--- almost completely full, even though most of those steps are too unlikely
--- to fire. A varibright grid does not have this problem: those steps render
--- at levels 3-7, dim enough to read as background.
---
--- 159 is the trig value at which the varibright curve first reaches level 8,
--- i.e. where a step starts looking clearly lit rather than shaded, so the
--- monobright display shows roughly what a varibright user perceives.
-local MONO_TRIG_THRESHOLD = 159
 
 -- Serial prefixes of grids without variable brightness. Monome serials are
 -- model-prefixed: the 40h series and the pre-2011 m64/m128/m256 walnut and
@@ -139,8 +130,6 @@ end
 
 -- Brightness accessors: every LED level goes through these so a single
 -- switch flips the whole UI between varibright and monobright palettes.
-function Grid._trig_level() return Grid.is_monobright and MONO_TRIG_LEVEL or TRIG_LEVEL end
-function Grid._min_trig_level() return Grid.is_monobright and MONO_MIN_TRIG_LEVEL or MIN_TRIG_LEVEL end
 function Grid._playpos_level() return Grid.is_monobright and MONO_PLAYPOS_LEVEL or PLAYPOS_LEVEL end
 function Grid._inactive_alt_level() return Grid.is_monobright and MONO_INACTIVE_ALT_LEVEL or INACTIVE_ALT_LEVEL end
 function Grid._inactive_page_level() return Grid.is_monobright and MONO_INACTIVE_PAGE_LEVEL or INACTIVE_PAGE_LEVEL end
@@ -283,11 +272,7 @@ function Trigs.refresh_grid_button(x, y, sequencer)
   -- All rows that aren't the bottom row show triggers if active, or the play position otherwise
   local trig_x = Grid._sequencer_pos(x)
   local trig_level = y ~= 8 and sequencer:trig_level(params:get("cy_pattern"), trig_x, y) or 0
-  -- On a monobright grid, a step too unlikely to fire is shown as empty
-  -- rather than at full brightness (see MONO_TRIG_THRESHOLD).
-  local shows_as_empty = trig_level == 0
-    or (Grid.is_monobright and trig_level < MONO_TRIG_THRESHOLD)
-  if shows_as_empty then
+  if trig_level == 0 then
     -- If there's no trigger in the slot, show the playhead if it's in our column, otherwise show empty
     if trig_x-1 == sequencer.playpos then
       Grid.connected_grid:led(x, y, Grid._playpos_level())
@@ -295,19 +280,11 @@ function Trigs.refresh_grid_button(x, y, sequencer)
       Grid.connected_grid:led(x, y, CLEAR_LEVEL)
     end
   else
-    -- Show the likelihood of a trigger firing via its brightness (down to some minimum brightness).
-    -- On a monobright grid both ends of the range are 15, so skip the interpolation
-    -- (linexp with equal endpoints is degenerate) and just light the LED.
-    local grid_trig_level
-    if Grid.is_monobright then
-      grid_trig_level = Grid._trig_level()
-    else
-      grid_trig_level = math.ceil(util.linexp(0, 255, Grid._min_trig_level(), Grid._trig_level(), trig_level))
-      -- Fade out the columns beyond the end of the pattern. There is no dimmer
-      -- shade available on a monobright grid, so it stays lit there instead.
-      local is_beyond_pattern_end = trig_x > sequencer:get_pattern_length()
-      grid_trig_level = is_beyond_pattern_end and math.ceil(grid_trig_level * 0.33) or grid_trig_level
-    end
+    -- Show the likelihood of a trigger firing via its brightness (down to some minimum brightness)
+    local grid_trig_level = math.ceil(util.linexp(0, 255, MIN_TRIG_LEVEL, TRIG_LEVEL, trig_level))
+    -- Fade out the columns beyond the end of the pattern
+    local is_beyond_pattern_end = trig_x > sequencer:get_pattern_length()
+    grid_trig_level = is_beyond_pattern_end and math.ceil(grid_trig_level * 0.33) or grid_trig_level
     Grid.connected_grid:led(x, y, grid_trig_level)
   end
 end
@@ -355,10 +332,7 @@ function Probabilities.refresh_grid_button(x, y, sequencer)
     end
   else
     local is_beyond_pattern_end = trig_x > sequencer:get_pattern_length()
-    local grid_trig_level = Grid._trig_level()
-    if is_beyond_pattern_end and not Grid.is_monobright then
-      grid_trig_level = math.ceil(grid_trig_level * 0.33)
-    end
+    local grid_trig_level = is_beyond_pattern_end and math.ceil(TRIG_LEVEL * 0.33) or TRIG_LEVEL
     Grid.connected_grid:led(x, y, grid_trig_level)
   end
 end
