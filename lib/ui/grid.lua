@@ -95,6 +95,22 @@ function Grid.refresh_monobright()
   Grid.set_monobright(setting)
 end
 
+-- Grids attach asynchronously, so at params:bang() time the vport's .device
+-- is usually still nil and Auto would resolve to varibright. Re-run the
+-- detection whenever the attached device changes identity. Called from the
+-- redraw path, which ticks continuously, so this self-corrects within a
+-- frame of the grid appearing without depending on the width-changed
+-- callback (which only fires when the width actually differs).
+function Grid.poll_monobright()
+  local device = Grid.connected_grid
+  local dev = device and (device.device or device)
+  local id = dev and (dev.serial or dev.name) or nil
+  if id ~= Grid._detected_device_id then
+    Grid._detected_device_id = id
+    Grid.refresh_monobright()
+  end
+end
+
 -- Apply the Monobright Grid param: 1 = Auto (detect), 2 = No, 3 = Yes
 function Grid.set_monobright(setting)
   if setting == 2 then
@@ -162,6 +178,7 @@ function Grid.init(sequencer)
     end,
     refresh_callback = function(my_grid)
       Grid.connected_grid = my_grid
+      Grid.poll_monobright()
       for x=1,Grid.grid_width do
         for y=1,HEIGHT do
           if y == 8 then
