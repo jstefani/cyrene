@@ -697,7 +697,14 @@ end
 
 function clock.transport.stop()
   if sequencer then
-    params:set("cy_play", 0)
+    if sequencer.playing then
+      params:set("cy_play", 0)
+    else
+      -- Already stopped: a second stop rewinds to the start,
+      -- matching K2 on the playback page.
+      params:set("cy_reset", 1)
+      UIState.grid_dirty = true
+    end
   end
 end
 
