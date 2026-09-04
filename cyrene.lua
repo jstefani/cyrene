@@ -239,6 +239,7 @@ function init()
   params:bang()
 
   _set_encoder_sensitivities()
+  _init_midi_transport_in()
 
   sequencer:initialize()
   params:set("cy_play", 1)
@@ -309,6 +310,33 @@ function clock.transport.start()
     -- (We need to call :_start directly above
     -- so we can pass immediately=true)
     params:set("cy_play", 1, true)
+  end
+end
+
+-- norns only forwards MIDI Start (0xFA) and Stop (0xFC) to clock.transport;
+-- Continue (0xFB) is dropped in matron. Controllers such as the Arturia
+-- Keystep pause/resume with Stop/Continue, so without this we stop on pause
+-- and never resume, and the next pause looks like a "second stop" and rewinds.
+-- Listen for Continue ourselves and resume from where we stopped.
+function _midi_transport_in_handler(port)
+  return function(data)
+    if data[1] ~= 0xfb then return end
+    -- "midi" is option 2 of the norns clock_source param
+    if params:get("clock_source") ~= 2 then return end
+    -- honor the norns "midi clock in" setting: 1=all, 2=none, n>2 = port n-2
+    local clock_in = norns.state.clock.midi_in
+    if clock_in == 2 then return end
+    if clock_in > 2 and clock_in - 2 ~= port then return end
+    if sequencer and not sequencer.playing then
+      -- not _start(true): let the clock loop sync to the next beat
+      params:set("cy_play", 1)
+    end
+  end
+end
+
+function _init_midi_transport_in()
+  for port=1,#midi.vports do
+    midi.vports[port].event = _midi_transport_in_handler(port)
   end
 end
 
