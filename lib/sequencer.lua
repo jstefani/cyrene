@@ -106,6 +106,17 @@ function Sequencer:add_params(arcify)
       end
     }
     if arcify then arcify:register("cy_pattern") end
+    -- MIDI Start (0xFA) means "play from the beginning" per the MIDI spec,
+    -- and hardware sequencers like the Arturia Keystep restart from step 1
+    -- on Start. "rewind" keeps us in step with them; "resume" is the old
+    -- behavior of continuing from wherever we stopped.
+    params:add {
+      type="option",
+      id="cy_midi_start",
+      name="MIDI Start",
+      options={"rewind", "resume"},
+      default=1,
+    }
   end
   params:add {
     type="number",
