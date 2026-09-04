@@ -688,6 +688,10 @@ end
 
 function clock.transport.start()
   if sequencer then
+    if params:get("cy_midi_start") == 1 then
+      sequencer:_move_to_start()
+      UIState.grid_dirty = true
+    end
     sequencer:_start(true)
     -- this is a no-op, but keeps the param in sync.
     -- (We need to call :_start directly above
